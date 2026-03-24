@@ -1,0 +1,86 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Research Proposal: Stock Market Forecasting and Trading Strategies via Neural Forecasting and Evolutionary Optimization}
+\author{Langning Li, Runpeng Zhu}
+\date{March 23, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+Stock market forecasting and trading strategies are crucial for investors and financial institutions. Traditional methods often rely on economic indicators and empricial rules, whereas most modern approaches are based on LSTM neural networks. However, these methods are not always effective in capturing the complex patterns and dynamics of stock markets. This project bridges the gap between the two approaches by developing a hybrid machine learning model that combines both economic indicators and historical data to predict stock prices and generate trading signals.
+
+\section{Problem Definition and Motivation}
+The main question of this project is:
+
+Can a neural sequence model produce more useful stock price predictions than the simple linear baselines, and can these predictions be converted into better trading decisions using evolutionary optimization?
+
+我感觉这个project需要一个核心问题，这个问题比较清晰而且理由相对充足。因为股票数据是按照时间排列的，因此将linear与LSTM等sequence morel进行比较是合理的。还有一点就是，预测模型只有在ouput能够支持后续决策时才有用，所以我感觉我们需要想一下如何将模型ouput和交易行为联系起来。
+
+\section{Dataset}
+The dataset we use is the daily index values of the NASDAQ Composite Index at market close. It is from Federal Reserve Bank of St. Louis and spans from Feb 05, 1971 to Mar 20, 2026.
+
+In addition to closing prices, we will add a small number of standard technical indicators, such as:
+\begin{itemize}
+    \item daily return,
+    \item moving averages,
+    \item momentum over recent days,
+    \item ....
+\end{itemize}
+
+\section{Baseline Models}
+可能还需要一个trading baselines.
+
+\subsection{Prediction Baselines}
+\begin{itemize}
+    \item \textbf{Ridge Regression:} predicts next-day return using recent historical features. 
+    \item \textbf{Logistic Regression:} predicts whether the market will move up or down the next day. 
+\end{itemize}
+
+\section{Proposed Method}
+Our proposed method has two stages.
+
+\subsection{Stage 1: Neural Forecasting Model}
+We will use an LSTM-based forecasting model (takes recent market data as input) to predicts:
+\begin{itemize}
+    \item next day return
+    \item next day direction (up/down).
+\end{itemize}
+
+\subsection{Stage 2: Evolutionary Optimization for Trading Decisions}
+Instead of using the raw model output directly, we define a simple parameterized trading rule:
+\begin{itemize}
+    \item buy if the predicted return or confidence exceeds a threshold,
+    \item sell if it falls below another threshold,
+    \item otherwise hold.
+\end{itemize}
+
+We then use an evolutionary algorithm to optimize some parameters that relate to decisions, such as:
+\begin{itemize}
+    \item buy threshold
+    \item sell threshold
+    \item optional holding period
+\end{itemize}
+
+\section{Evaluation Plan}
+We will split the dataset into training, validation, and test periods.
+
+\subsection{Prediction Evaluation}
+Depending on whether we use regression or classification as the primary method, we will report:
+\begin{itemize}
+    \item MSE, MAE, accuracy, precision, and F1-score.
+\end{itemize}
+
+\subsection{Trading Evaluation}
+还没有想好
+
+\end{document}
