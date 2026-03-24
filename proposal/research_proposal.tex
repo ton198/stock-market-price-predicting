@@ -1,0 +1,56 @@
+
+\documentclass[12pt, a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{xeCJK}
+
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Research Proposal: Stock Market Forecasting and Trading Strategies via Hybrid Machine Learning Models}
+\author{Langning Li, Runping Zhu}
+\date{March 23, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+Stock market forecasting and trading strategies are crucial for investors and financial institutions. Traditional methods often rely on economic indicators and empricial rules, whereas most modern approaches are based on LSTM neural networks. However, these methods are not always effective in capturing the complex patterns and dynamics of stock markets. This project fulfills the gap between the two approaches by developing a hybrid machine learning model that combines both economic indicators and historical data to predict stock prices and generate trading signals.
+
+\section{Dataset}
+
+The dataset we use is the daily index values of the NASDAQ Composite Index at market close. It is from Federal Reserve Bank of St. Louis and spans from Feb 05, 1971 to Mar 20, 2026.
+
+\section{Baseline Models}
+We use the following baseline models for comparison:
+\begin{itemize}
+    \item LSTM Neural Network
+    
+    Contains 2 LSTM layers with 128 units and a Dense layer with 1 unit.
+    
+    \item Ridge Regression
+    
+    // TODO: 这块添加 Ridge Regression 设置，我觉得也可以介绍一下ridge regression
+\end{itemize}
+
+
+\section{Proposed Method}
+We propose to use two hybrid models to predict the closing price of the next day and generate trading signals.
+\begin{itemize}
+    \item Model for price forecasting:
+    
+    We propose to use a two-step model in which step 1 contains LSTM layers for price forecasting based on historical data, and the step 2 contains () layers for revising the price from step 1 based on external factors from macroeconomic indicators, market sentiment, geopolitical indexs.
+    \item Model for trading signal generation:
+    
+    We propose to use an evolutionary algorithm to develop an optimized trading strategy. 
+    // TODO: 我觉得进化算法是一个比较好的方式来训练交易策略，但还没想好要怎么写
+\end{itemize}
+
+\section{Evaluation Plan}
+We will use data during a specific period for testing and comparsion. We will evaluate models based on the difference between real data and forecasting. For the model for trading signals, we will do simulated trading and compare our revenue with popular trading strategies used by financial institutions.
+// TODO: 大体应该是这样，但有没有更好的对比方式
+\end{document}
