@@ -1,0 +1,101 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Research Proposal: Stock Market Forecasting and Trading Strategies via Neural Forecasting and Evolutionary Optimization}
+\author{Langning Li, Runpeng Zhu}
+\date{March 23, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+Stock market forecasting and trading strategies are crucial for investors and financial institutions. Traditional methods often rely on economic indicators and empricial rules, whereas most modern approaches are based on LSTM neural networks. However, these methods are not always effective in capturing the complex patterns and dynamics of stock markets. This project bridges the gap between the two approaches by developing a hybrid machine learning model that combines both economic indicators and historical data to predict stock prices. In addition, because a 100\% accuracy prediction is impossible, a good trading strategy is considered to be more important than prediction. The usual trading strategies consists of buy and hold, simple moving average crossover, which often rely on the performance of the market, and are not always effective. In order to develop a market-neutral trading model, we propose to use an evolutionary algorithm to optimize the trading decisions.
+
+\section{Problem Definition and Motivation}
+The main question of this project is:\newline
+Can a hybrid neural sequence model produce reliable stock price predictions, and can these predictions be converted into better trading decisions using evolutionary algorithm?
+
+\section{Dataset}
+We will use several datasets to train and test our model.
+\begin{itemize}
+    \item NASDAQ Composite Index: The daily index values of the NASDAQ Composite Index at market close. It is from Federal Reserve Bank of St. Louis and spans from Feb 05, 1971 to Mar 20, 2026.
+    \item Economic Data: We will use the following economic data from Federal Reserve Bank of St. Louis:
+    \begin{itemize}
+        \item Gross Domestic Product (GDP)
+        \item Consumer Price Index (CPI)
+        \item Interest Rate
+    \end{itemize}
+    \item Geopolitical Index: We will use geopolitical index from web page \url{https://www.matteoiacoviello.com/gpr.htm}, which is a measure of the risk of geopolitical events.
+\end{itemize}
+
+
+\section{Baseline Models}
+
+\subsection{Prediction Baselines}
+\begin{itemize}
+    \item \textbf{ARIMA:} A statistical model used for forecasting time series data. Most commonly used by financial institutions for short-term forecasting.
+    \item \textbf{Vanilla LSTM:} A simple LSTM model that takes recent market data as input and predicts the next day return.
+\end{itemize}
+\subsection{Trading Baselines}
+\begin{itemize}
+    \item \textbf{Buy and Hold:} A simple trading strategy that buys the stock on the first day and holds it until the end of the period.
+    \item \textbf{SMA Crossover:} A trading strategy that buys when the short-term moving average crosses above the long-term moving average and sells when the short-term moving average crosses below the long-term moving average.
+\end{itemize}
+
+\section{Proposed Method}
+Our proposed method has two stages.
+
+\subsection{Stage 1: Neural Forecasting Model}
+
+We propose to use several LSTM layers that take recent market data as input and predicts the next day return and direction. We will aso use several Fully Connected layers that take external factors as input to refine the prediction.
+Factors we will consider include:
+\begin{itemize}
+    \item Gross Domestic Product (GDP)
+    \item Consumer Price Index (CPI)
+    \item Interest Rate
+    \item Geopolitical Index
+\end{itemize}
+We also consider to use LLM to analyze related news and market sentiment to refine the prediction.
+
+\subsection{Stage 2: Evolutionary Optimization for Trading Decisions}
+
+We propose to use an evolutionary algorithm to optimize the trading decisions.
+The model will decide whether to buy, sell, or hold the stock given the recent market data and forecasted price produced by the stage 1 model. The output of the model will be a binary vector of length 3, representing probability of the buy, sell, and hold decisions.
+
+
+\section{Evaluation Plan}
+
+\subsection{Prediction Evaluation}
+We will compare the performance of our proposed forecasting model with the baseline models. We will use the following metrics:
+\begin{itemize}
+    \item Mean Absolute Error (MAE):\newline
+    The average absolute difference between the predicted and actual values. It tells how the model's predictions deviate from the actual values, it could be a direct measure of the confidence of the model, but largely impacted by outliers.
+    \[
+    \mathrm{MAE} = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|
+    \]
+
+    \item F1-score for direction prediction:\newline
+    The F1-score is the harmonic mean of the precision and recall. It tells the overall performance of the model in predicting the direction of the market, and will not be affected by the imbalance of the market.\newline
+    Precision: the ratio of true positive predictions to all positive predictions. \newline
+    Recall: the ratio of true positive predictions to all actual positive cases.
+    \[
+    \mathrm{F1\text{-}score} = 2 \cdot \frac{\mathrm{precision}\cdot\mathrm{recall}}{\mathrm{precision}+\mathrm{recall}}
+    \]
+\end{itemize}
+
+\subsection{Trading Evaluation}
+We will compare the performances of our trading model with the baseline trading strategies under different market conditions. We will use cumulative return to evaluate the performance of the trading model:
+\[
+\mathrm{Cumulative Return} = \frac{1}{n} \sum_{i=1}^{n} (1 + r_i)
+\]
+
+\end{document}
