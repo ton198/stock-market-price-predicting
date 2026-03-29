@@ -1,4 +1,2 @@
-
 proposal/build/*
-.vscode/
-
+.gitignore
