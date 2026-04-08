@@ -1,3 +1,4 @@
 proposal/build/*
 .gitignore
 .vscode/
+__pycache__/
