@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
-HIDDEN_SIZE = 512
-NUM_LAYERS = 4
+HIDDEN_SIZE = 256
+NUM_LAYERS = 3
 DROPOUT = 0.2
 WINDOW_SIZE = 45
 EARLY_STOP_PATIENCE = 10
