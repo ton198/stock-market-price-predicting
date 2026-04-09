@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,7 +29,7 @@ from LSTM_training import (
 
 
 
-MODEL_SAVE_PATH = _PROJECT_ROOT / "models" / "Vanilla_LSTM.pth"
+MODEL_SAVE_PATH = _PROJECT_ROOT / "models" / "Vanilla_LSTM_128_001_256_2_02_30.pth"
 DATASET_PATH = _PROJECT_ROOT / "datasets_aligned" / "NASDAQCOM.csv"
 
 
@@ -65,6 +64,18 @@ def load_model(model_save_path: Path) -> tuple[MyLSTMSequential, torch.device]:
     model.eval()
     return model, device
 
+def calculate_directional_accuracy(preds: np.ndarray, targets: np.ndarray) -> float:
+    correct = 0
+    for pred, target in zip(preds, targets):
+        if (pred > 0 and target > 0) or (pred < 0 and target < 0):
+            correct += 1
+    return correct / len(preds)
+
+def calculate_mean_absolute_error(preds: np.ndarray, targets: np.ndarray) -> float:
+    return np.mean(np.abs(preds - targets))
+
+def calculate_mean_squared_error(preds: np.ndarray, targets: np.ndarray) -> float:
+    return np.mean(np.square(preds - targets))
 
 def plot_predictions(preds: np.ndarray, targets: np.ndarray, test_dates: np.ndarray) -> None:
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
@@ -117,10 +128,12 @@ def main() -> None:
     targets = np.concatenate(all_targets)
 
 
-    mse = float(np.mean((preds - targets) ** 2))
-    mae = float(np.mean(np.abs(preds - targets)))
+    mse = calculate_mean_squared_error(preds, targets)
+    mae = calculate_mean_absolute_error(preds, targets)
+    da = calculate_directional_accuracy(preds, targets)
     print(f"Test MSE (daily fractional return): {mse:.8f}")
     print(f"Test MAE (daily fractional return): {mae:.8f}")
+    print(f"Test directional accuracy: {da:.8f}")
 
     plot_predictions(preds, targets, test_dates)
 

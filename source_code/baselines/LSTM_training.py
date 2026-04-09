@@ -5,14 +5,16 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 
-BATCH_SIZE = 32
+from torch.utils.data import DataLoader, TensorDataset
+torch.backends.cudnn.enabled = False
+
+BATCH_SIZE = 128
 LEARNING_RATE = 0.001
 HIDDEN_SIZE = 256
-NUM_LAYERS = 3
+NUM_LAYERS = 2
 DROPOUT = 0.2
-WINDOW_SIZE = 45
+WINDOW_SIZE = 30
 EARLY_STOP_PATIENCE = 10
 MODEL_SAVE_PATH = "models/Vanilla_LSTM.pth"
 TRAIN_RATIO = 0.8
@@ -23,11 +25,17 @@ class MyLSTMSequential(nn.Module):
 
     lstm : nn.LSTM
     linear : nn.Linear
+    lstm_cells : list[nn.LSTMCell]
+    hidden_size : int
+    num_layers : int
 
     def __init__(self, input_size: int, hidden_size: int, output_size: int, num_layers: int = 2, dropout: float = 0.2):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
         self.linear = nn.Linear(hidden_size, output_size)
+        self.lstm_cells = [nn.LSTMCell(input_size if i == 0 else hidden_size, hidden_size) for i in range(num_layers)]
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
 
     def forward(self, x):
         if len(x.shape) == 2:
@@ -36,6 +44,8 @@ class MyLSTMSequential(nn.Module):
             pass
         else:
             raise ValueError(f"Input shape must be 2 or 3, got {x.shape} and it should be (batch_size, sequence_length, input_size)")
+        
+
         
         x, _ = self.lstm(x)
         x = self.linear(x[:, -1, :])
@@ -60,10 +70,19 @@ def get_daily_percentage_change(data: torch.Tensor) -> torch.Tensor:
     result[0] = 0
     return result
 
+def get_device():
+    if torch.cuda.is_available():
+        print("Using CUDA")
+        return torch.device("cuda")
+    else:
+        print("Using CPU")
+        return torch.device("cpu")
+
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
+
+
+    device = get_device()
 
     df = pd.read_csv("datasets_aligned/NASDAQCOM.csv")
     data = torch.tensor(df["NASDAQCOM"].values, dtype=torch.float32)
@@ -80,29 +99,21 @@ if __name__ == "__main__":
     val_x, val_y = build_windows(data[val_start:val_end], WINDOW_SIZE)
     test_x, test_y = build_windows(data[test_start:], WINDOW_SIZE)
 
-    # train_x, train_y = build_windows(original_data[:train_end], WINDOW_SIZE)
-    # val_x, val_y = build_windows(original_data[val_start:val_end], WINDOW_SIZE)
-    # test_x, test_y = build_windows(original_data[test_start:], WINDOW_SIZE)
 
-
-    pin = device.type == "cuda"
     train_loader = DataLoader(
         TensorDataset(train_x, train_y),
         batch_size=BATCH_SIZE,
         shuffle=True,
-        pin_memory=pin,
     )
     val_loader = DataLoader(
         TensorDataset(val_x, val_y),
         batch_size=BATCH_SIZE,
         shuffle=False,
-        pin_memory=pin,
     )
     test_loader = DataLoader(
         TensorDataset(test_x, test_y),
         batch_size=BATCH_SIZE,
         shuffle=False,
-        pin_memory=pin,
     )
 
     model = MyLSTMSequential(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, dropout=DROPOUT, output_size=1).to(device)
@@ -118,8 +129,8 @@ if __name__ == "__main__":
         model.train()
         train_loss = 0.0
         for inputs, targets in train_loader:
-            inputs = inputs.to(device, non_blocking=pin)
-            targets = targets.to(device, non_blocking=pin)
+            inputs = inputs.to(device)
+            targets = targets.to(device)
             outputs = model(inputs)
             loss = criterion(outputs.squeeze(-1), targets)
             optimizer.zero_grad()
@@ -135,8 +146,8 @@ if __name__ == "__main__":
         val_loss = 0.0
         with torch.no_grad():
             for inputs, targets in val_loader:
-                inputs = inputs.to(device, non_blocking=pin)
-                targets = targets.to(device, non_blocking=pin)
+                inputs = inputs.to(device)
+                targets = targets.to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs.squeeze(-1), targets)
                 val_loss += loss.item()
