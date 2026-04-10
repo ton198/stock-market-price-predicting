@@ -25,6 +25,7 @@ class MyLSTMSequential(nn.Module):
 
     lstm : nn.LSTM
     linear : nn.Linear
+    activation : nn.Module
     lstm_cells : list[nn.LSTMCell]
     hidden_size : int
     num_layers : int
@@ -33,6 +34,7 @@ class MyLSTMSequential(nn.Module):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
         self.linear = nn.Linear(hidden_size, output_size)
+        self.activation = nn.ReLU()
         self.lstm_cells = [nn.LSTMCell(input_size if i == 0 else hidden_size, hidden_size) for i in range(num_layers)]
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -48,7 +50,8 @@ class MyLSTMSequential(nn.Module):
 
         
         x, _ = self.lstm(x)
-        x = self.linear(x[:, -1, :])
+        x = self.activation(x[:, -1, :])
+        x = self.linear(x)
         return x
 
 

@@ -29,7 +29,7 @@ from LSTM_training import (
 
 
 
-MODEL_SAVE_PATH = _PROJECT_ROOT / "models" / "Vanilla_LSTM_128_001_256_2_02_30.pth"
+MODEL_SAVE_PATH = _PROJECT_ROOT / "models" / "Vanilla_LSTM_HS_256_NL_2_DO_02.pth"
 DATASET_PATH = _PROJECT_ROOT / "datasets_aligned" / "NASDAQCOM.csv"
 
 
