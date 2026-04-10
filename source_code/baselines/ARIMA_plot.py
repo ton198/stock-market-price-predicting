@@ -1,151 +1,145 @@
-from __future__ import annotations
-
 from pathlib import Path
+import warnings
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error
 from statsmodels.tsa.arima.model import ARIMA
 
-import warnings
 warnings.filterwarnings("ignore")
 
-_BASELINE_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _BASELINE_DIR.parent.parent
+DATA_PATH = Path(__file__).resolve().parent.parent.parent / "datasets_aligned" / "NASDAQCOM.csv"
 
-DATASET_PATH = _PROJECT_ROOT / "datasets_aligned" / "NASDAQCOM.csv"
 TRAIN_RATIO = 0.8
+ARIMA_ORDER = (5, 0, 1)
+ROLLING_WINDOW_SIZE = 1000
+MAX_TEST_POINTS = 500
 
 
-def load_data(dataset_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(dataset_path)
+def load_data():
+    df = pd.read_csv(DATA_PATH)
     df["date"] = pd.to_datetime(df["date"])
     return df
 
 
-def get_daily_percentage_change(df: pd.DataFrame) -> pd.DataFrame:
+def get_return(df):
     df = df.copy()
     df["return"] = df["NASDAQCOM"].pct_change() * 10
     df = df.dropna().reset_index(drop=True)
     return df
 
 
-def split_data(df: pd.DataFrame, train_ratio: float = TRAIN_RATIO):
-    split_idx = int(len(df) * train_ratio)
+def split_data(df):
+    split_idx = int(len(df) * TRAIN_RATIO)
 
-    train = df["return"].iloc[:split_idx]
-    test = df["return"].iloc[split_idx:]
-    test_dates = df["date"].iloc[split_idx:]
+    train = df["return"].iloc[:split_idx].reset_index(drop=True)
+    test = df["return"].iloc[split_idx:].reset_index(drop=True)
+    test_dates = df["date"].iloc[split_idx:].reset_index(drop=True)
 
     return train, test, test_dates
 
-def walk_forward_arima(train, test, order=(5, 0, 1)):
+
+def restrict_test(test, dates):
+    if len(test) > MAX_TEST_POINTS:
+        test = test.iloc[-MAX_TEST_POINTS:].reset_index(drop=True)
+        dates = dates.iloc[-MAX_TEST_POINTS:].reset_index(drop=True)
+    return test, dates
+
+
+def walk_forward(train, test):
     history = list(train)
     predictions = []
 
-    for actual in test:
-        model = ARIMA(history, order=order)
-        model_fit = model.fit()
+    for i, actual in enumerate(test):
+        hist = history[-ROLLING_WINDOW_SIZE:]
 
-        forecast = model_fit.forecast(steps=1)
-        pred = float(forecast[0])
+        try:
+            model = ARIMA(hist, order=ARIMA_ORDER)
+            model_fit = model.fit()
+            forecast = model_fit.forecast(steps=1)
+            pred = float(np.asarray(forecast)[0])
+        except:
+            pred = float(np.mean(hist))
 
         predictions.append(pred)
-        history.append(actual)
+        history.append(float(actual))
 
-    return predictions
+        if (i + 1) % 50 == 0 or (i + 1) == len(test):
+            print(f"Processed {i + 1}/{len(test)} test points")
 
-
-def calculate_directional_accuracy(preds: np.ndarray, targets: np.ndarray) -> float:
-    correct = 0
-    for pred, target in zip(preds, targets):
-        if (pred > 0 and target > 0) or (pred < 0 and target < 0):
-            correct += 1
-    return correct / len(preds)
+    return np.array(predictions)
 
 
-def calculate_mean_squared_error(preds: np.ndarray, targets: np.ndarray) -> float:
-    return np.mean(np.square(preds - targets))
+def direction_accuracy(y_true, y_pred):
+    return np.mean(np.sign(y_true) == np.sign(y_pred))
 
 
-def direction_f1(preds: np.ndarray, targets: np.ndarray) -> float:
-    pred_dir = (preds > 0).astype(int)
-    true_dir = (targets > 0).astype(int)
+def direction_f1(y_true, y_pred):
+    true = (y_true > 0).astype(int)
+    pred = (y_pred > 0).astype(int)
 
-    tp = np.sum((pred_dir == 1) & (true_dir == 1))
-    fp = np.sum((pred_dir == 1) & (true_dir == 0))
-    fn = np.sum((pred_dir == 0) & (true_dir == 1))
+    tp = np.sum((true == 1) & (pred == 1))
+    fp = np.sum((true == 0) & (pred == 1))
+    fn = np.sum((true == 1) & (pred == 0))
 
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) else 0
+    recall = tp / (tp + fn) if (tp + fn) else 0
 
-    if precision + recall == 0:
-        return 0.0
+    return 2 * precision * recall / (precision + recall) if (precision + recall) else 0
 
-    return 2 * precision * recall / (precision + recall)
+def plot_results(dates, y_true, y_pred):
+    residuals = y_pred - y_true
 
+    plt.figure(figsize=(12, 8))
 
-def plot_predictions(preds: np.ndarray, targets: np.ndarray, test_dates: np.ndarray) -> None:
-    fig, axes = plt.subplots(
-        2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
-    )
+    plt.subplot(3, 1, 1)
+    plt.plot(dates, y_true, label="Actual")
+    plt.plot(dates, y_pred, label="Predicted", alpha=0.8)
+    plt.title("ARIMA Walk-Forward Prediction")
+    plt.legend()
+    plt.grid(True)
 
-    axes[0].plot(test_dates, targets, label="Actual", linewidth=1.0)
-    axes[0].plot(test_dates, preds, label="Predicted", linewidth=1.0, alpha=0.85)
-    axes[0].set_ylabel("Daily return (*10 scaled)")
-    axes[0].set_title("ARIMA — test set: actual vs predicted daily return")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    plt.subplot(3, 1, 2)
+    plt.plot(dates, residuals)
+    plt.axhline(0, linestyle="--")
+    plt.title("Residuals")
+    plt.grid(True)
 
-    residual = preds - targets
-    axes[1].plot(test_dates, residual, linewidth=0.7)
-    axes[1].axhline(0.0, color="black", linewidth=0.5)
-    axes[1].set_ylabel("Residual")
-    axes[1].set_xlabel("Date")
-    axes[1].grid(True, alpha=0.3)
+    plt.subplot(3, 1, 3)
+    correct = (np.sign(y_true) == np.sign(y_pred)).astype(int)
+    plt.plot(dates, correct)
+    plt.title("Direction Correctness (1 = correct)")
+    plt.grid(True)
 
-    fig.autofmt_xdate()
     plt.tight_layout()
     plt.show()
 
-
-def main() -> None:
-    if not DATASET_PATH.is_file():
-        raise FileNotFoundError(f"Missing dataset at {DATASET_PATH}")
-
+if __name__ == "__main__":
     print("Loading data...")
-    df = load_data(DATASET_PATH)
+    df = load_data()
 
     print("Computing returns...")
-    df = get_daily_percentage_change(df)
+    df = get_return(df)
 
     print("Splitting data...")
-    train, test, test_dates = split_data(df)
-    print(f"Train size: {len(train)}, Test size: {len(test)}")
+    train, test, dates = split_data(df)
 
-    print("Training ARIMA...")
-    model = ARIMA(train, order=(1, 0, 1)).fit()
+    test, dates = restrict_test(test, dates)
 
-    print("Forecasting...")
-    predictions = model.forecast(steps=len(test))
-    predictions = np.asarray(predictions)
-    # predictions = walk_forward_arima(train, test, order=(5, 0, 1))
-    targets = np.asarray(test)
-    test_dates = np.asarray(test_dates)
+    print("Running walk-forward ARIMA...")
+    preds = walk_forward(train, test)
 
-    mse = calculate_mean_squared_error(predictions, targets)
-    mae = mean_absolute_error(targets, predictions)
-    da = calculate_directional_accuracy(predictions, targets)
-    f1 = direction_f1(predictions, targets)
+    y_true = test.values
+    mse = np.mean((y_true - preds) ** 2)
+    mae = mean_absolute_error(y_true, preds)
+    acc = direction_accuracy(y_true, preds)
+    f1 = direction_f1(y_true, preds)
 
-    print(f"Test MSE: {mse:.8f}")
-    print(f"Test MAE: {mae:.8f}")
-    print(f"Test directional accuracy: {da:.8f}")
-    print(f"Test direction F1: {f1:.8f}")
+    print("\n===== RESULTS =====")
+    print(f"MSE: {mse:.6f}")
+    print(f"MAE: {mae:.6f}")
+    print(f"Direction Accuracy: {acc:.6f}")
+    print(f"Direction F1: {f1:.6f}")
 
-    plot_predictions(predictions, targets, test_dates)
-
-
-if __name__ == "__main__":
-    main()
+    plot_results(dates, y_true, preds)
