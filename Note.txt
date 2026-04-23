@@ -1,7 +1,10 @@
-Date:
-start: 1985.01.01
-end: 2024.10.01
 
-Data: 补齐节假日与周末数据
+Questions:
+Can I do better using Reinforcement Learning than fully trusting stage 1?
 
-data_gpr_daily_recent: GPRD_MA7
+I have infinite actions for the reinforcement learning.
+A state include <holding, available cashes, predictions, confidence>
+An action include <how much to buy/sell>
+
+I do not have enough data for stage 2. Can I randomly generate some data following the same distribution?
+
