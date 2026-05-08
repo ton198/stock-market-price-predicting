@@ -21,8 +21,8 @@
 Stock market forecasting and trading strategies are crucial for investors and financial institutions. Traditional methods often rely on economic indicators and empirical rules, whereas most modern approaches are based on LSTM neural networks. However, these methods are not always effective in capturing the complex patterns and dynamics of stock markets. This project bridges the gap between the two approaches by developing a hybrid machine learning model that combines both economic indicators and historical data to predict stock prices. In addition, because 100\% accuracy prediction is impossible, a good trading strategy is considered to be more important than prediction. Usual trading strategies consist buy and hold, simple moving average crossover, etc, which often rely on the performance of the market, and are not always effective. In order to develop a market-neutral trading model, we propose to use an evolutionary algorithm to optimize the trading decisions.
 
 \section{Problem Definition and Motivation}
-The main question of this project is:\newline
-Can a hybrid neural sequence model produce reliable stock price prediction, and can these predictions be converted into better trading decisions using evolutionary algorithm?
+The main question of this project is:\\
+Do macroeconomic and geopolitical indicators improve trading performance in neural forecasting models, and can evolutionary optimization further improve these results compared to traditional strategies?
 
 \section{Dataset}
 We will use several datasets to train and test our model.
@@ -68,9 +68,27 @@ We also consider using LLM to analyze related news and market sentiment to refin
 
 \subsection{Stage 2: Evolutionary Optimization for Trading Decisions}
 
-We propose to use an evolutionary algorithm to optimize trading decisions.
-The model will decide whether to buy, sell, or hold the stock given recent market data and predicted price from the stage 1 model. The output of the model will be a binary vector of length 3, representing the probability of buy, sell, and hold decisions.
+\noindent To improve trading performance, we will use an evolutionary algorithm to optimize trading decisions based on model predictions and additional market indicators.\\
 
+\noindent In this framework, a trading strategy is defined using a set of parameters, including weights and thresholds. At each time step $t$, we compute a decision score:
+
+\[
+s_t = w_1 r_t + w_2 x_t,
+\]
+
+\noindent Here $r_t$ is the predicted return from previous model and $x_t$ represents additional indicators such as geopolitical or macroeconomic signals.\\
+
+\noindent The trading action is then determined by comparing the score with predefined thresholds:
+
+\[
+\begin{cases}
+\text{Buy} & \text{if } s_t > \theta_{\text{buy}}, \\
+\text{Sell} & \text{if } s_t < \theta_{\text{sell}}, \\
+\text{Hold} & \text{otherwise}.
+\end{cases}
+\]
+
+\noindent The final goal of the evolutionary algorithm is to find the optimal parameters $\{w_1, w_2, \theta_{\text{buy}}, \theta_{\text{sell}}\}$ that can earn more money. 
 
 \section{Evaluation Plan}
 
