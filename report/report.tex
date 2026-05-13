@@ -1,0 +1,264 @@
+\documentclass{article}
+
+% NeurIPS style file
+\usepackage[final]{neurips_2024}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{placeins}
+
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{float}
+
+\title{ Quantitative Trading Optimization: A Machine Learning Approach of Stock Market Forecasting and Trading Decision Making via Hybrid LSTM and DQN}
+
+\author{
+Langning Li \& Runpeng Zhu \\
+University of Rochester \\
+Rochester, NY 14627, USA \\
+\texttt{lli81@u.rochester.edu \quad rzhu12@u.rochester.edu }
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Stock market forecasting is a challenging machine learning problem, because many of the financial data are noisy, nonlinear, and easily being affected by external factors. In this project, we develop a two-stage hybrid model that can predict the future value of the stock and making profitable trading decisions. First, we compare traditional and deep learning forecasting models, and later we use a Deep Q-Network (DQN) agent to convert forecasting signals into trading actions. We evaluate the forecasting models using directional accuracy, F1 score, and AUC-ROC, and analyze the effectiveness and limitations of the trading strategy. Finally, our results show that the stage one' s hybrid learning models can make more precise prediction compare to the two baselines, while the DQN model provides a flexible framework for trading decision optimization.
+
+\end{abstract}
+
+\section{Introduction}
+Financial market is difficult to predict because the change of the price is being affected by many interacting factors [4]. Historical prices and returns sequence contain useful temporal information, but they are often noisy and unstable. Also, the broader external factors such as macroeconomic conditions, interest rates, and geopolitical risk can also influence how the market price might change. This makes stock forecasting a challenging task to do, especially when the final objective have to both predict the future values of the stock and making profitable trading decisions.
+
+A simple method for financial forecasting is to use the traditional statistical time series models. These models are not very complicated and can be easily understand, but they have a hard time capturing nonlinear relationships in market data. Deep learning models, especially the recurrent neural networks such as LSTM, provide a better option because they can learn and remember the temporal patterns from sequential data. However, using only historical returns may ignore important external information that affects market movement. Therefore, combining market return sequences with additional financial and macroeconomic features may provide a more complete representation of the market state.
+
+In this project, we try to address stock market forecasting and trading decision problem making by building a two stage hybrid framework. In the first stage, the forecasting model predicts future market movement using both historical return information and external features. In the second stage, the predicted signal is used by a trading agent to select actions in a simulated trading environment. By connecting prediction with decision making, this framework allows us to evaluate not only forecasting accuracy, but also how useful the predicted signals are for quantitative trading.
+
+\section{Problem Formulation and Project Goal}
+
+Let $d_t$ denote the market future market direction at time $t$. The price forecasting task is to predict the direction of the future market return using historical information. Given a sequence of past stock market data,
+\[
+X_t = \{x_{t-k+1}, x_{t-k+2}, \ldots, x_t\},
+\]
+where $k$ is the size of the sliding window, the model predicts the future stock market direction or the probability of whether the future market return will be positive.
+
+In this project, the whole problem is being divided into two parts: market direction forecasting and trading decision making. The stage one's forecasting task is mainly being treated as a directional prediction problem. Instead of predicting the exact future stock price or return value, our goal is to predict whether the next market return will increase or decrease. Using the historical return sequences and external financial features in the dataset, the forecasting model learns to estimate the future direction of market movement. 
+
+The second task is being treated as a strategy making problem. At each time step, the trading agent observes the market related features and the predicted market signal, then chooses a trading action. Each action corresponds to a specific portfolio position, ranging from short exposure to leveraged long exposure. The final reward of the model is based on the resulting portfolio return, with an additional alignment component that encourages the agent to choose positions consistent with the predicted market direction. In this way, the project connects the stage one directional forecasting model and the stage two decision optimization model together.
+
+\section{Methodology}
+
+\subsection{Dataset}
+The dataset used in this project is a multivariate NASDAQ time series dataset. It contains historical market features such as open, high, low, close price, trading volume, and daily return, as well as external financial and macroeconomic features  such as VIX, treasury yield, dollar index, federal funds rate, unemployment rate, and CPI-related variables. These features provide complete and useful information for both short term market movement and the market's long term trend.
+
+\subsection{ARIMA Baseline}
+
+We use the ARIMA model as the first baseline for stage one: a traditional statistical time series model [1]. For this baseline, we only use the historical NASDAQ return sequence as input into the ARIMA, and we did not incorporate any of the other external financial features in the dataset into this part. The return is being computed from the NASDAQ everyday stock market price by percentage change, and the dataset being split by standard: first 80\% of the data used for training and the remaining 20\% used for testing.
+
+In our implementation, we use an ARIMA (5,0,1) model with a walk forward forecasting setup. To make the experiment computationally manageable, we evaluate the model on the most recent 500 test points. At each test step, the model is fitted using the most recent 1000 historical return values and predicts the next return. After each prediction, the true return is added back into the history before moving to the next step. This simulates a realistic forecasting setting where only past information is available.
+
+Finally, we convert the ARIMA prediction into a directional signal by checking whether the predicted return is positive or negative. A positive predicted return will be labeled as 1, while a negative predicted return will be labeled as 0. This allows the ARIMA baseline to produce a direction based output that is consistent with the stage one goal of predicting future market movement.
+
+\begin{verbatim}
+model = ARIMA(history[-1000:], order=(5, 0, 1))
+model_fit = model.fit()
+pred = model_fit.forecast(steps=1)
+\end{verbatim}
+
+\subsection{Vanilla LSTM Baseline}
+
+We use the vanilla LSTM model as the deep learning baseline for the stage one. Compared with ARIMA, the LSTM can learn nonlinear temporal patterns from sequential data [2]. However, this baseline still only uses the historical return sequence as input, and we did not incorporate any of the other external financial features in the dataset into this model's input.
+
+For this model, we input the data into the model using a sliding window. Each sample contains the past 30 days of return values, and the model predicts the return at the next time step. The dataset being split by standard: the first 80\% of the data is used for training, the next 10\% is used for validation, and the remaining 10\% is used for testing.
+
+The model contains two layers: a LSTM followed by a linear output layer. In our implementation, the hidden size is set to 256, dropout is set to 0.2, and the batch size is 32. The model uses the Adam optimizer with a learning rate of 0.001. Early stopping is applied based on validation loss, with a patience value of 20 epochs.
+
+\begin{verbatim}
+model = MyLSTMSequential(
+    input_size=1,
+    hidden_size=256,
+    output_size=1,
+    num_layers=2,
+    dropout=0.2
+)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+criterion = nn.MSELoss()
+\end{verbatim}
+
+\subsection{Hybrid LSTM Model}
+
+The hybrid LSTM model is our self designed stock market value future forecasting model in this project. This hybrid model is based on the idea that LSTM models can learn useful temporal patterns from financial time series data [2, 6]. Unlike the ARIMA and vanilla LSTM baselines, this model uses a multivariate feature set instead of only the historical return sequence. The goal is to predict the probability of future market direction, or whether the market price is more likely to move up or down.
+
+For the target label, we use the 20-day forward return to represent future market movement. Rather than predicting the exact future return value, we treat the task as a direction prediction problem, whether the price will go up or down. Another key feature is the model learns to estimate the probability of the direction. Therefore, the model outputs one logit, and later being converted into a probability of future stock market direction.
+
+The model uses a two-stream architecture. The first stream takes sequential market features with a 60-day sliding window, where each sample has shape $60 \times 30$. This sequence is processed by an LSTM with hidden a hidden units of size 32. The second stream takes a macro snapshot with 7 features from the most recent day of the window. These macro features are passed through a linear layer and ReLU activation to produce a 16-dimensional macro embedding. The two outputs are then concatenated and passed through a dropout layer and a final linear layer to produce the prediction logit.
+
+\vspace{0.8 em}
+\begin{verbatim}
+Sequential features (60 days x 30)     Macro snapshot (7,)
+             |                                  |
+       LSTM (hidden=32)              Linear(7 -> 16) + ReLU
+             |                                  |
+    last hidden state (32,)          macro embedding (16,)
+             \______________ concat ___________/
+                            |
+                Dropout(0.3) -> Linear(48 -> 1)
+                            |
+                          logit
+\end{verbatim}
+\vspace{0.8 em}
+
+This design is motivated by the idea that daily market features and macroeconomic features behave differently [6]. Market returns and the other technical indicators can change quickly within a short amount of time, so they are being processed by a LSTM time series model. In contrast, macro and risk-regime variables usually change slowly, so they are passed into the model as a separate snapshot. So creating two separate pipelines that process the data differently preserves long term signal. Later, by combining these two separate streams, the model can utilize both short term price info and long term market signals for future stock market direction prediction.
+
+The model is trained using \texttt{BCEWithLogitsLoss}, which combines a sigmoid operation with binary cross-entropy loss and is suitable for binary classification. We use the Adam optimizer with learning rate 0.001, dropout of 0.3, gradient clipping for training stability, and early stopping based on validation performance.
+
+
+\begin{verbatim}
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="min", factor=0.5, patience=5
+)
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+\end{verbatim}
+   
+\subsection{DQN-Based Trading Agent}
+
+For the second stage, we use a Deep Q-Network (DQN) agent to convert the stage one hybrid LSTM prediction signal into trading strategies [3]. The goal of this part is to learn to use the predicted signal to make effective trading strategies under the trading environment. At each time step, the agent observes the LSTM probability signal, recent market information, current portfolio position, cash ratio, and market regime information, and used those observed data to choose the correct action from the discrete action space.
+
+In our implementation, the action space contains 31 possible actions. Each action symbols a target portfolio position, ranging from $-100\%$ short exposure to $200\%$ leveraged long exposure. For example, a negative position represents short selling, and a position greater than $100\%$ represents using the leverage. 
+
+The reward function is mainly based on the portfolio return generated by the selected position. In addition, we add an alignment bonus that encourages the agent to choose positions consistent with the predicted market direction from the hybrid LSTM model. If the predicted signal suggests an upward movement, long positions are encouraged; if the signal suggests a downward movement, short or lower exposure positions are encouraged. The reward design is shown below:
+
+\begin{verbatim}
+portfolio_return = daily_return * pos_ratio
+reward_base      = portfolio_return * 100
+
+desired   = 2 * signal_t - 1
+alignment = (1 + pos_ratio * desired) / 2
+bonus     = alignment * abs(daily_return) * 20
+
+reward = reward_base + bonus
+\end{verbatim}
+
+The DQN model is trained with a length of 252 trading days, and this is approximately one trading year (exclude the weekends and holidays). We use a replay buffer, epsilon greedy exploration, and a target network update mechanism through this part. The policy network is a multilayer perceptron with two hidden layers of size 256. The model is trained for 1,000,000 timesteps with learning rate $10^{-4}$, discount factor $\gamma = 0.97$, batch size 128, and replay buffer size 100,000.
+
+\begin{verbatim}
+dqn = DQN(
+    "MlpPolicy",
+    env,
+    buffer_size=100000,
+    learning_starts=5000,
+    batch_size=128,
+    learning_rate=1e-4,
+    gamma=0.97,
+    target_update_interval=1000,
+    policy_kwargs=dict(net_arch=[256, 256])
+)
+\end{verbatim}
+
+\section{Experimental Results}
+
+This section will talks about the experimental results for both stages of the project. The first part evaluates the stage one forecasting models, such as ARIMA, vanilla LSTM, and hybrid LSTM. Since the main goal of stage one is future market direction prediction, the most important metrics are directional accuracy and F1 score. The second part evaluates the DQN based reinforce learning trading agent, which uses the forecasting signal to make trading decisions.
+
+\subsection{Stage - One Forecasting Results}
+
+Table 1 shows the future market direction prediction of the three stage one models. Since our main goal is to predict whether the future market value will move up or down, we focus on classification-based metrics: accuracy, F1 score, and AUC-ROC.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Stage-one future market direction prediction results.}
+\label{tab:stage1_results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Accuracy} & \textbf{F1 Score} & \textbf{AUC-ROC} \\
+\midrule
+ARIMA & 0.5400 & 0.6417 & -- \\
+Vanilla LSTM & 0.5531 & 0.7123 & -- \\
+Hybrid LSTM & 0.6291 & 0.7069 & 0.6672 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stage-Two Trading Results}
+
+After evaluating the stage one forecasting models, we use the output of the stage one hybrid LSTM model as part of the input to the DQN trading agent. The goal of this part is to test whether the predicted market direction signal can be converted into useful trading decisions. The DQN agent is evaluated on the period that range from 2019 to 2026, with an initial portfolio value of \$10,000. We compare the DQN strategy with three basic strategy: buy \& hold strategy, always cash strategy, and a fixed threshold strategy.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Stage-two trading performance comparison}
+\label{tab:dqn_results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Strategy} & \textbf{Total Return} & \textbf{Sharpe} & \textbf{Max Drawdown} & \textbf{Win Rate} \\
+\midrule
+DQN & 510.90\% & 0.954 & 35.65\% & 51.14\% \\
+Buy \& Hold & 182.67\% & 0.751 & 36.40\% & 55.65\% \\
+Always Cash & 0.00\% & 0.000 & 0.00\% & 0.00\% \\
+Fixed Threshold & 134.57\% & 0.699 & 34.97\% & 27.15\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Analysis and Discussion}
+\subsection{Stage - One Forecasting Results}
+The ARIMA baseline model achieves a directional accuracy of 0.5400 and an F1 score of 0.6417. This result shows that a traditional statistical time series model has the ability to utilize some of the short term patterns within the history data. But its performance is poor, because it can only takes the past return values as the input, and does not include external financial information, and its accuracy is only slightly above the 0.5 which is close to random guessing.
+
+The vanilla LSTM baseline model slightly improves directional accuracy to 0.5531 and has an F1 score of 0.7123. Compared with ARIMA, this simple LSTM model is capable to learn more useful nonlinear patterns from the historical data. However, the improvement in accuracy is still small and is only 0.0131, which shows that using only  historical returns may not provide enough information for reliable stock market future direction prediction.
+
+The hybrid LSTM achieves the best directional accuracy among all three models, with a direction accuracy of 0.6291, F1 score of 0.7069, and an AUC-ROC of 0.6672. This result suggests that using external financial and macroeconomic features helps the model to extract more useful information, learn more nonlinear patterns, and perform better. Although its F1 score is slightly lower than the vanilla LSTM, the hybrid model has much higher overall accuracy, and this makes it the strongest stage one model in our experiments compare to the two baselines.
+
+We also evaluate the the performance of hybrid LSTM on high confidence subset within the test set. A prediction is considered being high confidence when the predicted probability is greater than 0.6 or less than 0.4. This subset covers 12.2\% of the test samples and achieves an accuracy of 0.7525. This shows that the model's probability output contains useful confidence information: when the model is more certain about the future direction, it is more likely to be correct.
+
+\subsection{Stage-two trading performance comparison}
+The DQN strategy gets the highest total return among all three strategies, with a total return of 510.90\%. This is much higher than other baselines, the buy \& hold haves a return of 182.67\%, and the fixed threshold strategy has the return of 134.57\%. The DQN also gets the highest Sharpe ratio, and the result show that its return remain quite stable after considered the volatility. The DQN has a maximum drawdown of 35.65\%, which is slightly lower than the buy \& hold drawdown of 36.40\%. This shows that, in this simulated setting, the DQN has the ability to get a higher return without producing a larger maximum drawdown than buy \& hold.
+
+Comparing the results, the action distribution shows that the DQN does not simply stay in one fixed position. It chooses a wide range of actions, such as short exposure, partial long exposure, and leveraged long exposure. The action that happen most is the maximum long position, but the agent also uses several short and moderate position actions. This shows that the DQN is actual leaning from a dynamic trading policy rather than simply copying a buy \& hold strategy.
+
+Overall, the stage two results suggest that the DQN framework can successfully use the stage one model's forecasting signal for trading decision making. Also, the results of the model should still be carefully considered before being used, because the trading environment is simplified within this project. 
+
+\section{Limitations and Future Work}
+
+There are several limitations in our current project. First, the trading environment can not precisely mimic the real world scenarios. The current project does not incorporate the usage of transaction costs, slippage, or a fully realistic trading mechanism. Therefore, the result mainly shows that the DQN framework is useful for decision optimization in a simulated environment, rather than proving that the strategy would directly work in real trading [4, 5] .
+
+Second, the current model does not consider applying different method in different situations. For example, financial markets behave differently during bull markets, bear markets, and high volatility periods. A single forecasting model and trading agent may not perform well under complicated market conditions. In future work, the model can be improved by training separate strategies for different market conditions.
+
+Third, the DQN's action space is discrete. Although this implementation makes the reinforcement learning problem easier to train and test, the real world portfolio allocation is usually continuous. Future work can try to develop a continuous action reinforcement learning methods, such as policy gradient.
+
+Finally, the current project uses a two stage model structure, where the forecasting model is trained first and then the trading agent uses its prediction signal later. A possible future direction is to develop an end to end reinforcement learning framework that directly optimizes trading performance while learning useful market representations at the same time. 
+
+\section{Conclusion}
+
+In conclusion, this project developed a two stage machine learning framework for stock market direction prediction and trading decision making. The stage one results show that the hybrid LSTM achieves a stronger directional prediction performance than the ARIMA and vanilla LSTM baselines by using both historical market features and external financial information. The stage two results show that the DQN agent can convert the predicted market signal into flexible trading actions in a simulated environment. Overall, the project demonstrates the potential of combining sequence forecasting and reinforcement learning for quantitative trading, and also showing that more realistic trading assumptions are needed in future work.
+
+
+\section*{References}
+
+\par [1] G. E. P. Box, G. M. Jenkins, G. C. Reinsel, and G. M. Ljung, \textit{Time Series Analysis: Forecasting and Control}, 5th ed. Hoboken, NJ, USA: Wiley, 2015.
+
+\par [2] S. Hochreiter and J. Schmidhuber, ``Long short-term memory,'' \textit{Neural Computation}, vol. 9, no. 8, pp. 1735--1780, Nov. 1997. doi:10.1162/neco.1997.9.8.1735
+
+\par [3] V. Mnih, K. Kavukcuoglu, D. Silver, A. A. Rusu, J. Veness, M. G. Bellemare, A. Graves, M. Riedmiller, A. K. Fidjeland, G. Ostrovski, \textit{et al.}, ``Human-level control through deep reinforcement learning,'' \textit{Nature}, vol. 518, no. 7540, pp. 529--533, Feb. 2015. doi:10.1038/nature14236
+
+\par [4] E. F. Fama, ``Efficient capital markets: A review of theory and empirical work,'' \textit{The Journal of Finance}, vol. 25, no. 2, pp. 383--417, May 1970. doi:10.1111/j.1540-6261.1970.tb00518.x
+
+\par [5] J. Moody and M. Saffell, ``Learning to trade via direct reinforcement,'' \textit{IEEE Transactions on Neural Networks}, vol. 12, no. 4, pp. 875--889, Jul. 2001. doi:10.1109/72.935097
+
+\par [6] T. Fischer and C. Krauss, ``Deep learning with long short-term memory networks for financial market predictions,'' \textit{European Journal of Operational Research}, vol. 270, no. 2, pp. 654--669, Oct. 2018. doi:10.1016/j.ejor.2017.11.054
+
+\end{document}
