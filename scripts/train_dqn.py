@@ -19,7 +19,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from quant_pipeline.backtest import simulate_positions
 from quant_pipeline.data import PreparedDataset, prepare_dataset
-from quant_pipeline.dqn_env import DQNTradingEnv, OBSERVATION_HIGH, OBSERVATION_LOW
+from quant_pipeline.dqn_env import (
+    DQNTradingEnv,
+    OBSERVATION_HIGH,
+    OBSERVATION_LOW,
+    RESEARCH_PROTOCOL,
+)
 from quant_pipeline.evaluator import load_prediction_csv
 from quant_pipeline.metrics import strategy_metrics
 from quant_pipeline.signals import (
@@ -56,6 +61,25 @@ ENVIRONMENT_DEFAULTS = {
     "margin_rate": 0.02 / 252,
 }
 VALIDATION_FREQUENCY = 10_000
+STAGE1_SELECTION_CRITERION = "validation_loss ascending, seed ascending tie-break"
+OBSERVATION_NAMES = (
+    "normalized_signal",
+    "recent_5d_norm",
+    "vol_norm",
+    "position_ratio",
+    "cash_ratio",
+    "Regime",
+)
+
+
+def canonical_manifest_metadata() -> dict[str, object]:
+    """Return protocol fields required on every canonical DQN run manifest."""
+
+    return {
+        "status": "research_only",
+        "portfolio_publication_allowed": False,
+        "protocol": dict(RESEARCH_PROTOCOL),
+    }
 
 
 def resolve_stage1_artifacts(
@@ -63,37 +87,52 @@ def resolve_stage1_artifacts(
 ) -> tuple[Path, dict[str, Any]]:
     """Resolve either a selected seed directory or a full Stage 1 summary."""
 
-    path = Path(stage1_artifacts)
-    summary_path = path / "summary.json"
-    if summary_path.is_file():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"cannot read Stage 1 summary: {summary_path}") from exc
-        selection = summary.get("stage1_selection")
-        if not isinstance(selection, dict):
-            raise ValueError("Stage 1 summary lacks stage1_selection")
-        seed_directory = selection.get("seed_directory")
-        seed = selection.get("seed")
-        if not isinstance(seed_directory, str) or not isinstance(seed, int):
-            raise ValueError("Stage 1 selection must identify a seed directory and seed")
-        selected = path / seed_directory
-        if not (selected / "manifest.json").is_file():
-            raise ValueError(f"selected Stage 1 artifacts do not exist: {selected}")
-        selected_manifest = _load_stage1_manifest(selected)
-        if selected_manifest.get("seed") != seed:
-            raise ValueError("Stage 1 summary selection does not match the selected manifest")
-        return selected, dict(selection)
-    if (path / "manifest.json").is_file():
-        manifest = _load_stage1_manifest(path)
-        return path, {
-            "seed": manifest.get("seed"),
-            "seed_directory": path.name,
-            "criterion": "explicit preselected Stage 1 artifact directory",
-        }
-    raise ValueError(
-        "stage1_artifacts must contain summary.json or a selected seed manifest.json"
-    )
+    requested = Path(stage1_artifacts)
+    if (requested / "summary.json").is_file():
+        run_directory = requested
+        requested_seed_directory: Path | None = None
+    elif (requested / "manifest.json").is_file():
+        run_directory = requested.parent
+        requested_seed_directory = requested
+    else:
+        raise ValueError(
+            "stage1_artifacts must identify a full Stage 1 summary or selected seed"
+        )
+
+    summary_path = run_directory / "summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"a validated Stage 1 selection summary is required: {summary_path}"
+        ) from exc
+    selection = summary.get("stage1_selection")
+    if not isinstance(selection, dict):
+        raise ValueError("Stage 1 summary lacks stage1_selection")
+    if selection.get("criterion") != STAGE1_SELECTION_CRITERION:
+        raise ValueError("Stage 1 summary has a noncanonical selection criterion")
+    seed_directory = selection.get("seed_directory")
+    seed = selection.get("seed")
+    validation_loss = selection.get("validation_loss")
+    if (
+        not isinstance(seed_directory, str)
+        or Path(seed_directory).name != seed_directory
+        or isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or isinstance(validation_loss, bool)
+        or not isinstance(validation_loss, (int, float))
+        or not np.isfinite(validation_loss)
+    ):
+        raise ValueError("Stage 1 summary selection record is incomplete or invalid")
+    selected = run_directory / seed_directory
+    if requested_seed_directory is not None and selected.resolve() != requested.resolve():
+        raise ValueError("requested seed is not the predeclared Stage 1 selection")
+    if not (selected / "manifest.json").is_file():
+        raise ValueError(f"selected Stage 1 artifacts do not exist: {selected}")
+    selected_manifest = _load_stage1_manifest(selected)
+    if selected_manifest.get("seed") != seed:
+        raise ValueError("Stage 1 summary selection does not match the selected manifest")
+    return selected, dict(selection)
 
 
 def _load_stage1_manifest(stage1_artifacts: Path) -> dict[str, Any]:
@@ -520,8 +559,7 @@ def train_dqn_seed(
 
     resolved_device = str(model.device)
     manifest: dict[str, object] = {
-        "status": "research_only",
-        "portfolio_publication_allowed": False,
+        **canonical_manifest_metadata(),
         "seed": int(seed),
         "timesteps": int(timesteps),
         "wall_clock_seconds": float(wall_clock_seconds),
@@ -545,14 +583,7 @@ def train_dqn_seed(
         },
         "source_feature_names": list(dataset.feature_names),
         "static_feature_names": ["recent_5d_norm", "vol_norm", "Regime"],
-        "observation_names": [
-            "normalized_signal",
-            "recent_5d_norm",
-            "vol_norm",
-            "Regime",
-            "position_ratio",
-            "cash_ratio",
-        ],
+        "observation_names": list(OBSERVATION_NAMES),
         "observation_bounds": {
             "low": OBSERVATION_LOW.tolist(),
             "high": OBSERVATION_HIGH.tolist(),

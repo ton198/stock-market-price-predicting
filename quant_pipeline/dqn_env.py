@@ -11,6 +11,30 @@ import numpy as np
 
 OBSERVATION_LOW = np.array([0, 0, 0, -1, -1, 0], dtype=np.float32)
 OBSERVATION_HIGH = np.array([1, 1, 1, 1, 2, 1], dtype=np.float32)
+RESEARCH_PROTOCOL = {
+    "origin": "fixed",
+    "split_basis": "prediction_anchor",
+    "label_overlap_purged_at_boundaries": False,
+    "exact_retraining_at_each_boundary": False,
+    "qualification": (
+        "Fixed-origin, anchor-based, unpurged offline research protocol; "
+        "not an exact retraining-at-boundary simulation."
+    ),
+}
+
+
+def _finite_scalar(name: str, value: float, *, positive: bool = False) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite number") from exc
+    if not np.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    if positive and number <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    if not positive and number < 0.0:
+        raise ValueError(f"{name} cannot be negative")
+    return number
 
 
 class DQNTradingEnv(gym.Env[np.ndarray, int]):
@@ -49,23 +73,37 @@ class DQNTradingEnv(gym.Env[np.ndarray, int]):
             raise ValueError("signal and extra_features must be finite")
         if ((signal_values < 0.0) | (signal_values > 1.0)).any():
             raise ValueError("signal must lie in [0, 1]")
-        if initial_cash <= 0:
-            raise ValueError("initial_cash must be positive")
-        if transaction_cost < 0 or slippage < 0 or margin_rate < 0:
-            raise ValueError("cost, slippage, and margin rate cannot be negative")
-        if episode_length < 1 or episode_length >= price_values.size:
+        initial_cash_value = _finite_scalar("initial_cash", initial_cash, positive=True)
+        transaction_cost_value = _finite_scalar("transaction_cost", transaction_cost)
+        slippage_value = _finite_scalar("slippage", slippage)
+        signal_bonus_value = _finite_scalar(
+            "signal_bonus_weight", signal_bonus_weight
+        )
+        vol_penalty_value = _finite_scalar(
+            "vol_penalty_weight", vol_penalty_weight
+        )
+        margin_rate_value = _finite_scalar("margin_rate", margin_rate)
+        if (
+            isinstance(episode_length, bool)
+            or not np.isscalar(episode_length)
+            or not np.isfinite(episode_length)
+            or float(episode_length) != int(episode_length)
+        ):
+            raise ValueError("episode_length must be a finite integer")
+        episode_length_value = int(episode_length)
+        if episode_length_value < 1 or episode_length_value >= price_values.size:
             raise ValueError("episode_length must be between 1 and len(prices) - 1")
 
         self.prices = price_values
         self.signal = signal_values
         self.extra_features = extras
-        self.initial_cash = float(initial_cash)
-        self.transaction_cost = float(transaction_cost)
-        self.slippage = float(slippage)
-        self.episode_length = int(episode_length)
-        self.signal_bonus_weight = float(signal_bonus_weight)
-        self.vol_penalty_weight = float(vol_penalty_weight)
-        self.margin_rate = float(margin_rate)
+        self.initial_cash = initial_cash_value
+        self.transaction_cost = transaction_cost_value
+        self.slippage = slippage_value
+        self.episode_length = episode_length_value
+        self.signal_bonus_weight = signal_bonus_value
+        self.vol_penalty_weight = vol_penalty_value
+        self.margin_rate = margin_rate_value
         self.seed_value = seed
         self.action_space = spaces.Discrete(21)
         self.observation_space = spaces.Box(
@@ -110,9 +148,9 @@ class DQNTradingEnv(gym.Env[np.ndarray, int]):
                 self.signal[index],
                 self.extra_features[index, 0],
                 self.extra_features[index, 1],
-                self.extra_features[index, 2],
                 position_ratio,
                 cash_ratio,
+                self.extra_features[index, 2],
             ],
             dtype=np.float32,
         )

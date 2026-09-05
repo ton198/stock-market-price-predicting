@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -22,8 +23,52 @@ from quant_pipeline.backtest import (
     simulate_positions,
 )
 from quant_pipeline.data import PreparedDataset, prepare_dataset
+from quant_pipeline.dqn_env import RESEARCH_PROTOCOL
 from quant_pipeline.evaluator import align_test_predictions, load_prediction_csv
 from quant_pipeline.metrics import strategy_metrics
+
+
+CANONICAL_TRANSACTION_COST = 0.001
+CANONICAL_SLIPPAGE = 0.0005
+
+
+def _validate_cost_assumptions(
+    transaction_cost: float,
+    slippage: float,
+    diagnostics: dict[str, Any] | None,
+) -> tuple[float, float]:
+    values = (float(transaction_cost), float(slippage))
+    if not all(math.isfinite(value) and value >= 0.0 for value in values):
+        raise ValueError("transaction_cost and slippage must be finite and non-negative")
+    if values == (CANONICAL_TRANSACTION_COST, CANONICAL_SLIPPAGE):
+        return values
+
+    reviewed = (diagnostics or {}).get("reviewed_alternative")
+    if not isinstance(reviewed, dict):
+        raise ValueError("noncanonical costs require a reviewed alternative record")
+    reference = reviewed.get("review_reference")
+    reviewed_values = (
+        reviewed.get("transaction_cost"),
+        reviewed.get("slippage"),
+    )
+    if (
+        reviewed.get("approved") is not True
+        or not isinstance(reference, str)
+        or not reference.strip()
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in reviewed_values
+        )
+        or not all(
+            math.isfinite(float(value)) and float(value) >= 0.0
+            for value in reviewed_values
+        )
+        or tuple(float(value) for value in reviewed_values) != values
+    ):
+        raise ValueError(
+            "reviewed alternative must be approved, referenced, finite, and match costs"
+        )
+    return values
 
 
 def load_action_csv(path: str | Path) -> tuple[tuple[str, ...], np.ndarray]:
@@ -54,12 +99,15 @@ def evaluate_dqn_actions(
     stage1_probabilities: np.ndarray,
     *,
     initial_equity: float = 10_000.0,
-    transaction_cost: float = 0.001,
-    slippage: float = 0.0005,
+    transaction_cost: float = CANONICAL_TRANSACTION_COST,
+    slippage: float = CANONICAL_SLIPPAGE,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Strictly align actions and report DQN plus canonical baselines."""
 
+    transaction_cost, slippage = _validate_cost_assumptions(
+        transaction_cost, slippage, diagnostics
+    )
     expected_dates = tuple(dataset.dates[dataset.splits.test])
     provided_dates = tuple(str(value) for value in action_dates)
     if provided_dates != expected_dates:
@@ -101,6 +149,7 @@ def evaluate_dqn_actions(
     return {
         "status": "research_only",
         "portfolio_publication_allowed": False,
+        "protocol": dict(RESEARCH_PROTOCOL),
         "test_start": expected_dates[0],
         "test_end": expected_dates[-1],
         "n_action_anchors": len(expected_dates),
@@ -125,8 +174,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--initial-equity", type=float, default=10_000.0)
-    parser.add_argument("--transaction-cost", type=float, default=0.001)
-    parser.add_argument("--slippage", type=float, default=0.0005)
+    parser.add_argument(
+        "--transaction-cost", type=float, default=CANONICAL_TRANSACTION_COST
+    )
+    parser.add_argument("--slippage", type=float, default=CANONICAL_SLIPPAGE)
     args = parser.parse_args(argv)
 
     diagnostics: dict[str, Any] = {}
@@ -148,6 +199,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "validation_checkpoint_selection", {}
             ),
         }
+        if "reviewed_alternative" in manifest:
+            diagnostics["reviewed_alternative"] = manifest["reviewed_alternative"]
     action_dates, positions = load_action_csv(args.actions)
     stage1_dates, probabilities = load_prediction_csv(args.stage1_predictions)
     report = evaluate_dqn_actions(

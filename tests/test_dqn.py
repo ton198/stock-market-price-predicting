@@ -8,19 +8,13 @@ from types import SimpleNamespace
 import numpy as np
 
 from quant_pipeline.backtest import probability_positions
-from quant_pipeline.data import Standardizer, prepare_dataset
-from quant_pipeline.evaluator import load_prediction_csv
+from quant_pipeline.data import Standardizer
 from quant_pipeline.signals import fit_signal_normalizer
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SELECTED_STAGE1 = (
-    PROJECT_ROOT
-    / "runs"
-    / "canonical_retrain"
-    / "20260905T053626Z"
-    / "stage1-full"
-    / "seed-119"
+PROTOCOL_QUALIFICATION = (
+    "Fixed-origin, anchor-based, unpurged offline research protocol; "
+    "not an exact retraining-at-boundary simulation."
 )
 
 
@@ -47,13 +41,13 @@ def write_prediction(path, dates, probabilities):
         writer.writerows(zip(dates, probabilities))
 
 
-def write_synthetic_stage1(directory):
+def write_synthetic_stage1(directory, *, seed=119, write_summary=True):
     directory.mkdir()
     streams = {
-        "train_dense": (("d1", "d2", "d3"), (0.2, 0.4, 0.6)),
-        "train_fit": (("d1", "d3"), (0.2, 0.6)),
-        "validation": (("d4", "d5"), (0.3, 0.7)),
-        "test": (("d6", "d7"), (0.4, 0.6)),
+        "train_dense": (("d5", "d6", "d7"), (0.2, 0.4, 0.6)),
+        "train_fit": (("d5", "d7"), (0.2, 0.6)),
+        "validation": (("d8", "d9"), (0.3, 0.7)),
+        "test": (("d10", "d11"), (0.4, 0.6)),
     }
     filenames = {
         name: f"predictions_{name}.csv"
@@ -62,7 +56,8 @@ def write_synthetic_stage1(directory):
     for name, (dates, probabilities) in streams.items():
         write_prediction(directory / filenames[name], dates, probabilities)
     manifest = {
-        "hyperparameters": {"window_size": 2, "train_stride": 2},
+        "seed": seed,
+        "hyperparameters": {"window_size": 6, "train_stride": 2},
         "streams": {
             name: {
                 "filename": filenames[name],
@@ -84,6 +79,18 @@ def write_synthetic_stage1(directory):
     (directory / "manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8"
     )
+    if write_summary:
+        summary = {
+            "stage1_selection": {
+                "criterion": "validation_loss ascending, seed ascending tie-break",
+                "seed": seed,
+                "seed_directory": directory.name,
+                "validation_loss": 0.5,
+            }
+        }
+        (directory.parent / "summary.json").write_text(
+            json.dumps(summary), encoding="utf-8"
+        )
     return streams
 
 
@@ -98,13 +105,17 @@ def synthetic_dataset():
             [0.01, 0.021, 1.0],
             [0.02, 0.024, 0.0],
             [0.03, 0.027, 1.0],
+            [0.04, 0.030, 0.0],
+            [0.05, 0.033, 1.0],
+            [0.06, 0.024, 0.0],
+            [0.07, 0.027, 1.0],
         ],
         dtype=np.float32,
     )
     return SimpleNamespace(
-        dates=tuple(f"d{index}" for index in range(8)),
-        close=np.linspace(100.0, 107.0, 8),
-        targets=np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64),
+        dates=tuple(f"d{index}" for index in range(12)),
+        close=np.linspace(100.0, 111.0, 12),
+        targets=np.arange(12, dtype=np.int64) % 2,
         features=raw_features.copy(),
         feature_names=("Return_lag5", "Volatility_20d", "Regime"),
         scaler=Standardizer(
@@ -112,7 +123,19 @@ def synthetic_dataset():
             scale_=np.ones(3, dtype=np.float32),
         ),
         splits=SimpleNamespace(
-            train=slice(0, 4), validation=slice(4, 6), test=slice(6, 8)
+            train=slice(0, 8), validation=slice(8, 10), test=slice(10, 12)
+        ),
+    )
+
+
+def synthetic_evaluation_dataset(test_rows):
+    rows = test_rows + 2
+    return SimpleNamespace(
+        dates=tuple(f"d{index}" for index in range(rows)),
+        close=np.linspace(100.0, 120.0, rows),
+        targets=np.arange(rows, dtype=np.int64) % 2,
+        splits=SimpleNamespace(
+            train=slice(0, 1), validation=slice(1, 2), test=slice(2, rows)
         ),
     )
 
@@ -185,9 +208,12 @@ class DQNTradingEnvironmentTests(unittest.TestCase):
     def test_observation_order_and_bounds_are_exact(self):
         extras = np.zeros((40, 3), dtype=np.float32)
         extras[0] = (0.25, 0.75, 1.0)
+        extras[1] = (0.2, 0.3, 0.5)
         signal = np.zeros(40, dtype=np.float32)
         signal[0] = 0.6
-        environment = synthetic_environment(extra_features=extras, signal=signal)
+        environment = synthetic_environment(
+            prices=np.full(40, 100.0), extra_features=extras, signal=signal
+        )
 
         observation, _ = environment.reset(options={"start": 0})
 
@@ -199,8 +225,25 @@ class DQNTradingEnvironmentTests(unittest.TestCase):
             environment.observation_space.high,
             np.array([1, 1, 1, 1, 2, 1], dtype=np.float32),
         )
-        np.testing.assert_allclose(observation, [0.6, 0.25, 0.75, 1.0, 0.0, 1.0])
+        np.testing.assert_allclose(observation, [0.6, 0.25, 0.75, 0.0, 1.0, 1.0])
         self.assertTrue(environment.observation_space.contains(observation))
+        short_observation, _, _, _, _ = environment.step(0)
+        self.assertLess(float(short_observation[3]), 0.0)
+        self.assertGreater(float(short_observation[4]), 1.0)
+        self.assertAlmostEqual(float(short_observation[5]), 0.5)
+
+    def test_environment_rejects_nan_numeric_configuration(self):
+        for name in (
+            "initial_cash",
+            "transaction_cost",
+            "slippage",
+            "episode_length",
+            "signal_bonus_weight",
+            "vol_penalty_weight",
+            "margin_rate",
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                synthetic_environment(**{name: float("nan")})
 
 
 class DQNObservationAssemblyTests(unittest.TestCase):
@@ -244,10 +287,10 @@ class DQNObservationAssemblyTests(unittest.TestCase):
                 dataset, artifacts, "test", normalizer
             )
 
-        self.assertEqual(dates, ("d6", "d7"))
-        np.testing.assert_allclose(prices, [106.0, 107.0])
+        self.assertEqual(dates, ("d10", "d11"))
+        np.testing.assert_allclose(prices, [110.0, 111.0])
         expected_recent = 0.5 + 0.5 * np.tanh(
-            np.array([106.0 / 101.0 - 1.0, 107.0 / 102.0 - 1.0]) / 0.05
+            np.array([110.0 / 105.0 - 1.0, 111.0 / 106.0 - 1.0]) / 0.05
         )
         np.testing.assert_allclose(extras[:, 0], expected_recent, rtol=1e-6)
         np.testing.assert_allclose(extras[:, 1], [0.8, 0.9], rtol=1e-6)
@@ -256,18 +299,20 @@ class DQNObservationAssemblyTests(unittest.TestCase):
     def test_selected_dense_train_stream_has_every_eligible_daily_anchor(self):
         from scripts.train_dqn import build_dqn_observations
 
-        dataset = prepare_dataset(PROJECT_ROOT / "datasets" / "nasdaq_multivariate.csv")
-        dense_dates, dense_probabilities = load_prediction_csv(
-            SELECTED_STAGE1 / "predictions_train_dense.csv"
-        )
-        normalizer = fit_signal_normalizer(dense_probabilities)
+        dataset = synthetic_dataset()
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = Path(temporary) / "seed-119"
+            streams = write_synthetic_stage1(artifacts)
+            normalizer = fit_signal_normalizer(
+                np.asarray(streams["train_dense"][1])
+            )
 
-        dates, prices, signal, extras = build_dqn_observations(
-            dataset, SELECTED_STAGE1, "train", normalizer
-        )
+            dates, prices, signal, extras = build_dqn_observations(
+                dataset, artifacts, "train", normalizer
+            )
 
-        self.assertEqual(len(dates), dataset.splits.train.stop - 59)
-        self.assertEqual(dates, dense_dates)
+        self.assertEqual(len(dates), 3)
+        self.assertEqual(dates, streams["train_dense"][0])
         self.assertEqual(prices.shape, signal.shape)
         self.assertEqual(extras.shape, (len(dates), 3))
 
@@ -350,14 +395,69 @@ class DQNTrainerTests(unittest.TestCase):
     def test_stage1_summary_resolves_only_its_preselected_seed(self):
         from scripts.train_dqn import resolve_stage1_artifacts
 
-        selected, selection = resolve_stage1_artifacts(SELECTED_STAGE1.parent)
+        with tempfile.TemporaryDirectory() as temporary:
+            run_directory = Path(temporary)
+            selected_artifacts = run_directory / "seed-119"
+            write_synthetic_stage1(selected_artifacts)
 
-        self.assertEqual(selected, SELECTED_STAGE1)
+            selected, selection = resolve_stage1_artifacts(run_directory)
+
+        self.assertEqual(selected, selected_artifacts)
         self.assertEqual(selection["seed"], 119)
         self.assertEqual(
             selection["criterion"],
             "validation_loss ascending, seed ascending tie-break",
         )
+
+    def test_arbitrary_seed_directory_without_selection_summary_is_rejected(self):
+        from scripts.train_dqn import resolve_stage1_artifacts
+
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = Path(temporary) / "seed-051"
+            write_synthetic_stage1(artifacts, seed=51, write_summary=False)
+
+            with self.assertRaisesRegex(ValueError, "summary"):
+                resolve_stage1_artifacts(artifacts)
+
+    def test_stage1_summary_rejects_a_noncanonical_selection_criterion(self):
+        from scripts.train_dqn import resolve_stage1_artifacts
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_directory = Path(temporary)
+            artifacts = run_directory / "seed-119"
+            write_synthetic_stage1(artifacts)
+            summary = json.loads((run_directory / "summary.json").read_text())
+            summary["stage1_selection"]["criterion"] = "test return descending"
+            (run_directory / "summary.json").write_text(json.dumps(summary))
+
+            with self.assertRaisesRegex(ValueError, "criterion"):
+                resolve_stage1_artifacts(run_directory)
+
+    def test_manifest_observation_names_follow_environment_slot_order(self):
+        from scripts.train_dqn import OBSERVATION_NAMES
+
+        self.assertEqual(
+            OBSERVATION_NAMES,
+            (
+                "normalized_signal",
+                "recent_5d_norm",
+                "vol_norm",
+                "position_ratio",
+                "cash_ratio",
+                "Regime",
+            ),
+        )
+
+    def test_training_manifest_metadata_qualifies_the_research_protocol(self):
+        from scripts.train_dqn import canonical_manifest_metadata
+
+        metadata = canonical_manifest_metadata()
+
+        self.assertEqual(
+            metadata["protocol"]["qualification"], PROTOCOL_QUALIFICATION
+        )
+        self.assertEqual(metadata["status"], "research_only")
+        self.assertFalse(metadata["portfolio_publication_allowed"])
 
 
 class DQNEvaluatorTests(unittest.TestCase):
@@ -365,7 +465,7 @@ class DQNEvaluatorTests(unittest.TestCase):
         from scripts.evaluate_dqn import evaluate_dqn_actions
 
         dataset = synthetic_dataset()
-        stage1_dates = ("d6", "d7")
+        stage1_dates = ("d10", "d11")
         probabilities = np.array([0.4, 0.6])
         with self.assertRaisesRegex(ValueError, "exactly match"):
             evaluate_dqn_actions(
@@ -388,7 +488,7 @@ class DQNEvaluatorTests(unittest.TestCase):
         from scripts.evaluate_dqn import evaluate_dqn_actions
 
         dataset = synthetic_dataset()
-        dates = ("d6", "d7")
+        dates = ("d10", "d11")
         probabilities = np.array([0.4, 0.6])
         positions = probability_positions(probabilities)
 
@@ -414,14 +514,55 @@ class DQNEvaluatorTests(unittest.TestCase):
         )
         self.assertEqual(report["diagnostics"]["shaped_reward"], 123.0)
         self.assertEqual(report["backtest"]["position_range"], [-1.0, 1.0])
+        self.assertEqual(report["protocol"]["qualification"], PROTOCOL_QUALIFICATION)
+
+    def test_noncanonical_costs_require_matching_reviewed_alternative(self):
+        from scripts.evaluate_dqn import evaluate_dqn_actions
+
+        dataset = synthetic_dataset()
+        dates = ("d10", "d11")
+        probabilities = np.array([0.4, 0.6])
+        positions = probability_positions(probabilities)
+        for transaction_cost, slippage in ((0.0, 0.0005), (0.001, 0.0)):
+            with self.subTest(
+                transaction_cost=transaction_cost, slippage=slippage
+            ), self.assertRaisesRegex(ValueError, "reviewed alternative"):
+                evaluate_dqn_actions(
+                    dataset,
+                    dates,
+                    positions,
+                    dates,
+                    probabilities,
+                    transaction_cost=transaction_cost,
+                    slippage=slippage,
+                )
+
+        report = evaluate_dqn_actions(
+            dataset,
+            dates,
+            positions,
+            dates,
+            probabilities,
+            transaction_cost=0.0,
+            slippage=0.0,
+            diagnostics={
+                "reviewed_alternative": {
+                    "approved": True,
+                    "review_reference": "cost-model-review-7",
+                    "transaction_cost": 0.0,
+                    "slippage": 0.0,
+                }
+            },
+        )
+        self.assertEqual(report["backtest"]["transaction_cost"], 0.0)
+        self.assertEqual(report["backtest"]["slippage"], 0.0)
 
     def test_canonical_test_contract_has_1771_anchors_and_1770_intervals(self):
         from scripts.evaluate_dqn import evaluate_dqn_actions
 
-        dataset = prepare_dataset(PROJECT_ROOT / "datasets" / "nasdaq_multivariate.csv")
-        dates, probabilities = load_prediction_csv(
-            SELECTED_STAGE1 / "predictions_test.csv"
-        )
+        dataset = synthetic_evaluation_dataset(1771)
+        dates = tuple(dataset.dates[dataset.splits.test])
+        probabilities = np.linspace(0.25, 0.75, 1771)
 
         report = evaluate_dqn_actions(
             dataset,
