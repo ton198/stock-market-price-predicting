@@ -1,5 +1,7 @@
 import csv
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +41,13 @@ def write_prediction(path, dates, probabilities):
         writer = csv.writer(handle)
         writer.writerow(("Date", "probability"))
         writer.writerows(zip(dates, probabilities))
+
+
+def write_actions(path, dates, positions):
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("Date", "position"))
+        writer.writerows(zip(dates, positions))
 
 
 def write_synthetic_stage1(directory, *, seed=119, write_summary=True):
@@ -409,6 +418,21 @@ class DQNTrainerTests(unittest.TestCase):
             "validation_loss ascending, seed ascending tie-break",
         )
 
+    def test_stage1_summary_file_path_resolves_its_preselected_seed(self):
+        from scripts.train_dqn import resolve_stage1_artifacts
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_directory = Path(temporary)
+            selected_artifacts = run_directory / "seed-119"
+            write_synthetic_stage1(selected_artifacts)
+
+            selected, selection = resolve_stage1_artifacts(
+                run_directory / "summary.json"
+            )
+
+        self.assertEqual(selected, selected_artifacts)
+        self.assertEqual(selection["seed"], 119)
+
     def test_arbitrary_seed_directory_without_selection_summary_is_rejected(self):
         from scripts.train_dqn import resolve_stage1_artifacts
 
@@ -451,13 +475,28 @@ class DQNTrainerTests(unittest.TestCase):
     def test_training_manifest_metadata_qualifies_the_research_protocol(self):
         from scripts.train_dqn import canonical_manifest_metadata
 
-        metadata = canonical_manifest_metadata()
+        pilot_metadata = canonical_manifest_metadata(pilot=True)
+        full_metadata = canonical_manifest_metadata(pilot=False)
 
         self.assertEqual(
-            metadata["protocol"]["qualification"], PROTOCOL_QUALIFICATION
+            pilot_metadata["protocol"]["qualification"], PROTOCOL_QUALIFICATION
         )
-        self.assertEqual(metadata["status"], "research_only")
-        self.assertFalse(metadata["portfolio_publication_allowed"])
+        self.assertEqual(pilot_metadata["status"], "research_only")
+        self.assertFalse(pilot_metadata["portfolio_publication_allowed"])
+        self.assertTrue(pilot_metadata["pilot"])
+        self.assertFalse(full_metadata["pilot"])
+
+    def test_training_cli_exposes_explicit_pilot_marker(self):
+        completed = subprocess.run(
+            [sys.executable, "scripts/train_dqn.py", "--help"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--pilot", completed.stdout)
 
 
 class DQNEvaluatorTests(unittest.TestCase):
@@ -574,6 +613,304 @@ class DQNEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(report["n_action_anchors"], 1771)
         self.assertEqual(report["n_backtest_intervals"], 1770)
+
+
+class DQNSummaryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from quant_pipeline.data import prepare_dataset
+
+        cls.project_root = Path(__file__).resolve().parents[1]
+        cls.data_path = cls.project_root / "datasets" / "nasdaq_multivariate.csv"
+        cls.dataset = prepare_dataset(cls.data_path)
+
+    def make_stage1_artifacts(self, root):
+        stage1_run = root / "stage1-full"
+        selected = stage1_run / "seed-119"
+        selected.mkdir(parents=True)
+        selection = {
+            "criterion": "validation_loss ascending, seed ascending tie-break",
+            "seed": 119,
+            "seed_directory": "seed-119",
+            "validation_loss": 0.6920855045318604,
+        }
+        (stage1_run / "summary.json").write_text(
+            json.dumps(
+                {
+                    "stage1_selection": selection,
+                    "stage2_gate": {
+                        "decision": "hold",
+                        "reason": "validation gate held",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (selected / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "seed": 119,
+                    "hyperparameters": {"window_size": 60},
+                    "streams": {
+                        "train_dense": {
+                            "filename": "predictions_train_dense.csv",
+                            "rows": 6133,
+                            "cadence": 1,
+                            "start_date": self.dataset.dates[59],
+                            "end_date": self.dataset.dates[6191],
+                            "role": "in-sample Stage 1 stream eligible for DQN",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        test_dates = tuple(self.dataset.dates[self.dataset.splits.test])
+        probabilities = np.linspace(0.4, 0.6, len(test_dates))
+        write_prediction(selected / "predictions_test.csv", test_dates, probabilities)
+        return stage1_run / "summary.json", selected, selection
+
+    def make_seed_artifacts(
+        self,
+        run_dir,
+        stage1_summary,
+        selected_stage1,
+        selection,
+        seed,
+        *,
+        pilot,
+        write_evaluation,
+    ):
+        from quant_pipeline.dqn_env import RESEARCH_PROTOCOL
+        from scripts.evaluate_dqn import evaluate_dqn_actions, manifest_diagnostics
+        from scripts.train_dqn import DQN_HYPERPARAMETERS, ENVIRONMENT_DEFAULTS
+
+        seed_dir = run_dir / f"seed-{seed:03d}"
+        checkpoints = seed_dir / "checkpoints"
+        checkpoints.mkdir(parents=True)
+        (seed_dir / "model.zip").write_bytes(b"model")
+        validation_dates = tuple(
+            self.dataset.dates[self.dataset.splits.validation]
+        )
+        test_dates = tuple(self.dataset.dates[self.dataset.splits.test])
+        validation_positions = np.zeros(len(validation_dates))
+        test_positions = np.zeros(len(test_dates))
+        write_actions(
+            seed_dir / "actions_validation.csv",
+            validation_dates,
+            validation_positions,
+        )
+        write_actions(seed_dir / "actions_test.csv", test_dates, test_positions)
+        timesteps = 100_000 if pilot else 1_000_000
+        records = [
+            {
+                "step": step,
+                "mean_costed_total_return": float(step == 10_000),
+                "windows": [
+                    {
+                        "start": start,
+                        "stop": start + 253,
+                        "n_anchors": 253,
+                        "n_intervals": 252,
+                        "costed_total_return": float(step == 10_000),
+                        "shaped_reward": 0.0,
+                    }
+                    for start in (0, 315, 631)
+                ],
+            }
+            for step in range(10_000, timesteps + 1, 10_000)
+        ]
+        manifest = {
+            "status": "research_only",
+            "portfolio_publication_allowed": False,
+            "pilot": pilot,
+            "protocol": dict(RESEARCH_PROTOCOL),
+            "seed": seed,
+            "timesteps": timesteps,
+            "wall_clock_seconds": float(seed),
+            "device": {"requested": "auto", "resolved": "cpu"},
+            "stage1": {
+                "requested_path": str(stage1_summary),
+                "selected_artifacts": str(selected_stage1),
+                "selection": selection,
+            },
+            "signal_normalizer": {
+                "fit_split": "train_dense",
+                "fit_filename": "predictions_train_dense.csv",
+                "mean": 0.5,
+                "scale": 0.1,
+                "rows": 6133,
+            },
+            "input_streams": {
+                "train": "predictions_train_dense.csv",
+                "validation": "predictions_validation.csv",
+                "test": "predictions_test.csv",
+            },
+            "observation_bounds": {
+                "low": [0.0, 0.0, 0.0, -1.0, -1.0, 0.0],
+                "high": [1.0, 1.0, 1.0, 1.0, 2.0, 1.0],
+            },
+            "environment": {
+                **ENVIRONMENT_DEFAULTS,
+                "signal_bonus_weight": 20.0,
+                "action_count": 21,
+                "action_mapping": "action_index / 10 - 1",
+                "reward_usage": "learning_only",
+            },
+            "dqn_hyperparameters": dict(DQN_HYPERPARAMETERS),
+            "validation_checkpoint_selection": {
+                "frequency_environment_steps": 10_000,
+                "criterion": (
+                    "highest mean costed total_return; earliest checkpoint on ties"
+                ),
+                "window_starts": [0, 315, 631],
+                "records": records,
+                "selected_step": 10_000,
+                "selected_mean_costed_total_return": 1.0,
+            },
+            "split_alignment": {
+                "train": {
+                    "rows": 6133,
+                    "start_date": self.dataset.dates[59],
+                    "end_date": self.dataset.dates[6191],
+                },
+                "validation": {
+                    "rows": 884,
+                    "start_date": validation_dates[0],
+                    "end_date": validation_dates[-1],
+                },
+                "test": {
+                    "rows": 1771,
+                    "start_date": test_dates[0],
+                    "end_date": test_dates[-1],
+                },
+            },
+            "exports": {
+                "model": "model.zip",
+                "validation_actions": "actions_validation.csv",
+                "test_actions": "actions_test.csv",
+                "validation_shaped_reward": 0.0,
+                "test_shaped_reward": 0.0,
+            },
+            "test_contract": {
+                "action_anchors": 1771,
+                "realized_intervals": 1770,
+            },
+        }
+        manifest_path = seed_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        if write_evaluation:
+            stage1_dates, probabilities = tuple(test_dates), np.linspace(
+                0.4, 0.6, len(test_dates)
+            )
+            evaluation = evaluate_dqn_actions(
+                self.dataset,
+                test_dates,
+                test_positions,
+                stage1_dates,
+                probabilities,
+                diagnostics=manifest_diagnostics(manifest),
+            )
+            (seed_dir / "evaluation.json").write_text(
+                json.dumps(evaluation, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        return seed_dir
+
+    def make_run(self, root, *, pilot):
+        stage1_summary, selected_stage1, selection = self.make_stage1_artifacts(root)
+        run_dir = root / ("dqn-pilot" if pilot else "dqn-full")
+        seeds = (42, 59, 76) if pilot else (42, 59, 76, 93, 110)
+        for seed in seeds:
+            self.make_seed_artifacts(
+                run_dir,
+                stage1_summary,
+                selected_stage1,
+                selection,
+                seed,
+                pilot=pilot,
+                write_evaluation=not pilot,
+            )
+        return stage1_summary, run_dir
+
+    def test_pilot_summary_is_marked_and_has_no_final_aggregate(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=True)
+            summary = summarize_dqn_run(self.data_path, stage1_summary, run_dir)
+
+        self.assertTrue(summary["pilot"])
+        self.assertTrue(summary["excluded_from_final_aggregate"])
+        self.assertEqual(summary["seeds"], [42, 59, 76])
+        self.assertNotIn("aggregate", summary)
+
+    def test_full_summary_reports_shared_baselines_and_research_only_gate(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=False)
+            summary = summarize_dqn_run(self.data_path, stage1_summary, run_dir)
+
+        self.assertFalse(summary["pilot"])
+        self.assertEqual(summary["seeds"], [42, 59, 76, 93, 110])
+        self.assertEqual(summary["test_interval"]["action_anchors"], 1771)
+        self.assertEqual(summary["test_interval"]["backtest_intervals"], 1770)
+        self.assertEqual(summary["aggregate"]["dqn"]["total_return"], {
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+        })
+        self.assertEqual(
+            set(summary["baselines"]),
+            {"raw_stage1_probability_policy", "cash", "buy_and_hold"},
+        )
+        self.assertEqual(summary["status"], "research_only")
+        self.assertFalse(summary["portfolio_publication_allowed"])
+        self.assertEqual(summary["publication_gate"]["stage1_decision"], "hold")
+        self.assertIn("Across five predeclared seeds", summary["instability"]["note"])
+        self.assertEqual(len(summary["per_seed"]), 5)
+        self.assertEqual(len(summary["validation_checkpoint_records"]), 5)
+
+    def test_full_summary_rejects_pilot_artifact_reuse(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=False)
+            manifest_path = run_dir / "seed-042" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["pilot"] = True
+            manifest["timesteps"] = 100_000
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "pilot|timesteps"):
+                summarize_dqn_run(self.data_path, stage1_summary, run_dir)
+
+    def test_full_summary_rejects_evaluation_not_reproduced_from_actions(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=False)
+            evaluation_path = run_dir / "seed-042" / "evaluation.json"
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            evaluation["strategies"]["dqn"]["total_return"] = 9.0
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "shared evaluator"):
+                summarize_dqn_run(self.data_path, stage1_summary, run_dir)
+
+    def test_full_summary_rejects_invalid_selected_checkpoint_record(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=False)
+            manifest_path = run_dir / "seed-042" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["validation_checkpoint_selection"]["selected_step"] = 20_000
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "selected checkpoint"):
+                summarize_dqn_run(self.data_path, stage1_summary, run_dir)
 
 
 if __name__ == "__main__":

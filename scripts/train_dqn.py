@@ -72,12 +72,13 @@ OBSERVATION_NAMES = (
 )
 
 
-def canonical_manifest_metadata() -> dict[str, object]:
+def canonical_manifest_metadata(*, pilot: bool = False) -> dict[str, object]:
     """Return protocol fields required on every canonical DQN run manifest."""
 
     return {
         "status": "research_only",
         "portfolio_publication_allowed": False,
+        "pilot": bool(pilot),
         "protocol": dict(RESEARCH_PROTOCOL),
     }
 
@@ -88,7 +89,10 @@ def resolve_stage1_artifacts(
     """Resolve either a selected seed directory or a full Stage 1 summary."""
 
     requested = Path(stage1_artifacts)
-    if (requested / "summary.json").is_file():
+    if requested.is_file() and requested.name == "summary.json":
+        run_directory = requested.parent
+        requested_seed_directory = None
+    elif (requested / "summary.json").is_file():
         run_directory = requested
         requested_seed_directory: Path | None = None
     elif (requested / "manifest.json").is_file():
@@ -490,6 +494,7 @@ def train_dqn_seed(
     timesteps: int = 1_000_000,
     device: str = "auto",
     signal_bonus_weight: float = 20.0,
+    pilot: bool = False,
 ) -> dict[str, object]:
     """Train one DQN seed and write its model, actions, and audit manifest."""
 
@@ -559,7 +564,7 @@ def train_dqn_seed(
 
     resolved_device = str(model.device)
     manifest: dict[str, object] = {
-        **canonical_manifest_metadata(),
+        **canonical_manifest_metadata(pilot=pilot),
         "seed": int(seed),
         "timesteps": int(timesteps),
         "wall_clock_seconds": float(wall_clock_seconds),
@@ -639,6 +644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--signal-bonus-weight", type=float, default=20.0)
+    parser.add_argument("--pilot", action="store_true")
     args = parser.parse_args(argv)
     manifest = train_dqn_seed(
         prepare_dataset(args.data),
@@ -648,6 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         timesteps=args.timesteps,
         device=args.device,
         signal_bonus_weight=args.signal_bonus_weight,
+        pilot=args.pilot,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

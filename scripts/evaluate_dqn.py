@@ -32,6 +32,27 @@ CANONICAL_TRANSACTION_COST = 0.001
 CANONICAL_SLIPPAGE = 0.0005
 
 
+def manifest_diagnostics(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Keep learning diagnostics separate from investment-return metrics."""
+
+    exports = manifest.get("exports", {})
+    if not isinstance(exports, dict):
+        exports = {}
+    diagnostics: dict[str, Any] = {
+        "environment_shaped_reward": {
+            "validation_total": exports.get("validation_shaped_reward"),
+            "test_total": exports.get("test_shaped_reward"),
+            "usage": "learning diagnostics only; not reported investment return",
+        },
+        "validation_checkpoint_selection": manifest.get(
+            "validation_checkpoint_selection", {}
+        ),
+    }
+    if "reviewed_alternative" in manifest:
+        diagnostics["reviewed_alternative"] = manifest["reviewed_alternative"]
+    return diagnostics
+
+
 def _validate_cost_assumptions(
     transaction_cost: float,
     slippage: float,
@@ -186,21 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"cannot read DQN manifest: {args.manifest}") from exc
-        exports = manifest.get("exports", {})
-        if not isinstance(exports, dict):
-            exports = {}
-        diagnostics = {
-            "environment_shaped_reward": {
-                "validation_total": exports.get("validation_shaped_reward"),
-                "test_total": exports.get("test_shaped_reward"),
-                "usage": "learning diagnostics only; not reported investment return",
-            },
-            "validation_checkpoint_selection": manifest.get(
-                "validation_checkpoint_selection", {}
-            ),
-        }
-        if "reviewed_alternative" in manifest:
-            diagnostics["reviewed_alternative"] = manifest["reviewed_alternative"]
+        diagnostics = manifest_diagnostics(manifest)
     action_dates, positions = load_action_csv(args.actions)
     stage1_dates, probabilities = load_prediction_csv(args.stage1_predictions)
     report = evaluate_dqn_actions(
