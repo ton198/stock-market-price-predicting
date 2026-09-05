@@ -62,6 +62,99 @@ def read_predictions(path: Path) -> tuple[list[str], np.ndarray]:
     )
 
 
+def write_predictions(path: Path, dates: tuple[str, ...], probabilities: np.ndarray) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("Date", "probability"))
+        writer.writerows(zip(dates, probabilities, strict=True))
+
+
+def make_stage1_seed_artifacts(
+    run_dir: Path,
+    dataset: PreparedDataset,
+    seed: int,
+    validation_loss: float,
+) -> None:
+    seed_dir = run_dir / f"seed-{seed:03d}"
+    seed_dir.mkdir(parents=True)
+    stream_dates = {
+        "train_fit": dataset.dates[59 : dataset.splits.train.stop : 3],
+        "train_dense": dataset.dates[59 : dataset.splits.train.stop],
+        "validation": dataset.dates[dataset.splits.validation],
+        "test": dataset.dates[dataset.splits.test],
+    }
+    stream_slices = {
+        "train_fit": slice(59, dataset.splits.train.stop, 3),
+        "train_dense": slice(59, dataset.splits.train.stop),
+        "validation": dataset.splits.validation,
+        "test": dataset.splits.test,
+    }
+    filenames = {
+        "train_fit": "predictions_train_fit.csv",
+        "train_dense": "predictions_train_dense.csv",
+        "validation": "predictions_validation.csv",
+        "test": "predictions_test.csv",
+    }
+    for name, dates in stream_dates.items():
+        targets = np.asarray(dataset.targets[stream_slices[name]], dtype=np.float64)
+        probabilities = np.where(targets == 1.0, 0.55, 0.45)
+        write_predictions(seed_dir / filenames[name], dates, probabilities)
+
+    (seed_dir / "checkpoint.pt").write_bytes(b"fixture")
+    (seed_dir / "history.json").write_text(
+        json.dumps({"best_validation_loss": validation_loss}) + "\n",
+        encoding="utf-8",
+    )
+    metrics = {
+        "seed": seed,
+        "best_epoch": 3,
+        "epochs_completed": 4,
+        "train_fit_loss": 0.68,
+        "train_dense_loss": 0.67,
+        "validation_loss": validation_loss,
+        "test_loss": 0.66,
+    }
+    (seed_dir / "metrics.json").write_text(
+        json.dumps(metrics) + "\n", encoding="utf-8"
+    )
+    streams = {
+        name: {
+            "filename": filenames[name],
+            "rows": len(dates),
+            "cadence": 3 if name == "train_fit" else 1,
+            "role": (
+                "optimizer-sampling diagnostic only"
+                if name == "train_fit"
+                else "in-sample Stage 1 stream eligible for DQN"
+                if name == "train_dense"
+                else f"{name} inference"
+            ),
+            "start_date": dates[0],
+            "end_date": dates[-1],
+        }
+        for name, dates in stream_dates.items()
+    }
+    manifest = {
+        "seed": seed,
+        "checkpoint_selection": "lowest validation loss",
+        "hyperparameters": {"window_size": 60, "train_stride": 3},
+        "streams": streams,
+        "artifacts": [
+            "checkpoint.pt",
+            "history.json",
+            "predictions_train_fit.csv",
+            "predictions_train_dense.csv",
+            "predictions_validation.csv",
+            "predictions_test.csv",
+            "metrics.json",
+            "manifest.json",
+        ],
+    }
+    (seed_dir / "manifest.json").write_text(
+        json.dumps(manifest) + "\n", encoding="utf-8"
+    )
+
+
 class Stage1DataContractTests(unittest.TestCase):
     def setUp(self):
         self.features = np.arange(24, dtype=np.float32).reshape(12, 2)
@@ -283,6 +376,209 @@ class Stage1ModelContractTests(unittest.TestCase):
             "--train-stride",
         ):
             self.assertIn(option, completed.stdout)
+
+
+class Stage1EvaluationTests(unittest.TestCase):
+    def test_split_evaluator_uses_exact_validation_anchors(self):
+        import quant_pipeline.evaluator as evaluator
+
+        helper = getattr(evaluator, "evaluate_probability_stream_for_split", None)
+        self.assertTrue(callable(helper), "split-parameterized evaluator helper is missing")
+        dataset = make_tiny_dataset()
+        report = helper(
+            dataset,
+            "validation",
+            dataset.dates[10:14],
+            np.array([0.2, 0.8, 0.2, 0.8]),
+            transaction_cost=0.0,
+            slippage=0.0,
+        )
+
+        self.assertEqual(report["split"], "validation")
+        self.assertEqual(report["split_start"], "2024-01-11")
+        self.assertEqual(report["split_end"], "2024-01-14")
+        self.assertEqual(report["n_samples"], 4)
+        self.assertEqual(report["classification"]["accuracy"], 1.0)
+        with self.assertRaises(ValueError):
+            helper(
+                dataset,
+                "validation",
+                dataset.dates[11:14],
+                np.array([0.8, 0.2, 0.8]),
+            )
+
+    def test_exact_test_cli_behavior_remains_available(self):
+        dataset = prepare_dataset(PROJECT_ROOT / "datasets" / "nasdaq_multivariate.csv")
+        probabilities = np.full(dataset.splits.test.stop - dataset.splits.test.start, 0.5)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            predictions = root / "predictions.csv"
+            output = root / "evaluation.json"
+            write_predictions(predictions, dataset.dates[dataset.splits.test], probabilities)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/evaluate_predictions.py",
+                    "--predictions",
+                    str(predictions),
+                    "--data",
+                    "datasets/nasdaq_multivariate.csv",
+                    "--output",
+                    str(output),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["test_start"], "2019-02-01")
+            self.assertEqual(report["test_end"], "2026-02-18")
+            self.assertEqual(report["n_samples"], 1771)
+            self.assertNotIn("split", report)
+
+
+class Stage1SummaryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = PROJECT_ROOT / "datasets" / "nasdaq_multivariate.csv"
+        cls.dataset = prepare_dataset(cls.data_path)
+
+    def run_summarizer(self, run_dir: Path, output: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "scripts/summarize_stage1.py",
+                "--run-dir",
+                str(run_dir),
+                "--data",
+                str(self.data_path),
+                "--output",
+                str(output),
+            ],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_pilot_summary_evaluates_every_seed_without_selecting_stage1(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = Path(temporary_directory) / "stage1-pilot"
+            for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+            (run_dir / "seed-17").mkdir()
+            output = run_dir / "summary.json"
+
+            completed = self.run_summarizer(run_dir, output)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(summary["run_kind"], "pilot")
+            self.assertEqual(summary["seeds"], [0, 17, 34])
+            self.assertEqual(summary["technical_gate"]["status"], "pass")
+            self.assertNotIn("stage1_selection", summary)
+            self.assertIn(summary["stage2_gate"]["decision"], ("proceed_research_only", "hold"))
+            self.assertEqual(
+                summary["policy"]["position_rule"],
+                "clip(2 * probability - 1, -1, 1)",
+            )
+            self.assertEqual(
+                summary["baselines"]["training_prior"]["validation"]["brier"], 0.25
+            )
+            self.assertAlmostEqual(summary["aggregate"]["validation_loss"]["mean"], 0.68)
+            for seed in (0, 17, 34):
+                self.assertTrue(
+                    (run_dir / f"seed-{seed:03d}" / "canonical_evaluation.json").exists()
+                )
+            self.assertEqual(list(run_dir.glob(".summary.json.*.tmp")), [])
+
+    def test_summary_rejects_missing_or_extra_prediction_artifacts(self):
+        for mutation in ("missing", "extra"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = Path(temporary_directory) / "stage1-pilot"
+                for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                    make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+                if mutation == "missing":
+                    (run_dir / "seed-017" / "predictions_validation.csv").unlink()
+                else:
+                    shutil.copy2(
+                        run_dir / "seed-017" / "predictions_validation.csv",
+                        run_dir / "seed-017" / "predictions_shadow.csv",
+                    )
+                output = run_dir / "summary.json"
+
+                completed = self.run_summarizer(run_dir, output)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("prediction artifacts", completed.stderr)
+                self.assertFalse(output.exists())
+
+    def test_summary_recomputes_and_rejects_mismatched_immutable_test_evaluation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = Path(temporary_directory) / "stage1-pilot"
+            for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+            output = run_dir / "summary.json"
+            first = self.run_summarizer(run_dir, output)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            evaluation_path = run_dir / "seed-000" / "canonical_evaluation.json"
+            corrupted = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            corrupted["n_samples"] = 1
+            evaluation_path.write_text(json.dumps(corrupted) + "\n", encoding="utf-8")
+
+            second = self.run_summarizer(run_dir, output)
+
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("does not match shared evaluator", second.stderr)
+            self.assertEqual(
+                json.loads(evaluation_path.read_text(encoding="utf-8"))["n_samples"], 1
+            )
+
+    def test_summary_rejects_nonfinite_history_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = Path(temporary_directory) / "stage1-pilot"
+            for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+            (run_dir / "seed-017" / "history.json").write_text(
+                '{"best_validation_loss": NaN}\n', encoding="utf-8"
+            )
+            output = run_dir / "summary.json"
+
+            completed = self.run_summarizer(run_dir, output)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("contains NaN or infinity", completed.stderr)
+            self.assertFalse(output.exists())
+
+    def test_full_summary_selects_validation_loss_then_smallest_seed(self):
+        seeds = (0, 17, 34, 51, 68, 85, 102, 119, 136, 153)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = Path(temporary_directory) / "stage1-full"
+            for seed in seeds:
+                loss = 0.65 if seed in (17, 34) else 0.70 + seed / 10_000
+                make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+            output = run_dir / "summary.json"
+
+            completed = self.run_summarizer(run_dir, output)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(summary["run_kind"], "full")
+            self.assertEqual(summary["seeds"], list(seeds))
+            self.assertEqual(
+                summary["stage1_selection"],
+                {
+                    "criterion": "validation_loss ascending, seed ascending tie-break",
+                    "seed": 17,
+                    "seed_directory": "seed-017",
+                    "validation_loss": 0.65,
+                },
+            )
+            self.assertEqual(len(summary["per_seed"]), 10)
 
 
 if __name__ == "__main__":
