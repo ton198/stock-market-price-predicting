@@ -524,6 +524,26 @@ class Stage1SummaryTests(unittest.TestCase):
         cls.data_path = PROJECT_ROOT / "datasets" / "nasdaq_multivariate.csv"
         cls.dataset = prepare_dataset(cls.data_path)
 
+    def test_metric_table_uses_stable_metric_order(self):
+        from scripts.summarize_stage1 import _metric_table
+
+        first = {
+            "classification": {
+                "accuracy": {"mean": 1.0},
+                "auc_roc": {"mean": 2.0},
+                "f1": {"mean": 3.0},
+            }
+        }
+        second = {
+            "classification": {
+                "f1": {"mean": 3.0},
+                "accuracy": {"mean": 1.0},
+                "auc_roc": {"mean": 2.0},
+            }
+        }
+
+        self.assertEqual(_metric_table(first), _metric_table(second))
+
     def run_summarizer(self, run_dir: Path, output: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [

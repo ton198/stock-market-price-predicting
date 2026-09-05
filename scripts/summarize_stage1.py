@@ -487,7 +487,8 @@ def _metric_table(aggregate: Mapping[str, Any]) -> list[dict[str, Any]]:
         if set(values) == {"mean", "std", "median"}:
             rows.append({"metric": group, **values})
             continue
-        for metric, statistics in values.items():
+        for metric in sorted(values):
+            statistics = values[metric]
             rows.append({"metric": f"{group}.{metric}", **statistics})
     return rows
 
