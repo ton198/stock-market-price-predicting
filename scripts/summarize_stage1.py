@@ -79,6 +79,10 @@ CANONICAL_HYPERPARAMETERS = {
     "train_stride": 3,
     "learning_rate": 1e-3,
     "early_stopping_patience": 20,
+    "gradient_clip_norm": 1.0,
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 10,
+    "scheduler_min_lr": 1e-5,
 }
 CHECKPOINT_SELECTION = "lowest validation loss"
 # Saved prediction losses are float32 while history accumulation is float64.

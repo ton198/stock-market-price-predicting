@@ -516,3 +516,111 @@ No training command was rerun because all existing immutable per-seed
 checkpoint, history, metric, manifest, and prediction evidence satisfied the
 strengthened contract. No result artifact, model, portfolio, README,
 methodology file, notebook, or DQN file is included in this fix.
+
+## Scoped re-review fix: complete trainer hyperparameter contract
+
+The scoped re-review found that four trainer-recorded parameters were present
+in valid manifests and synthetic fixtures but absent from
+`CANONICAL_HYPERPARAMETERS`. The canonical contract now additionally requires:
+
+- `gradient_clip_norm: 1.0`;
+- `scheduler_factor: 0.5`;
+- `scheduler_patience: 10`; and
+- `scheduler_min_lr: 1e-5`.
+
+The existing self-consistent noncanonical-configuration test was extended with
+`scheduler_factor: 0.4`. This exercises the summarizer through its CLI and
+asserts a nonzero exit, canonical-hyperparameter error, and no summary output.
+
+### RED
+
+Command:
+
+```bash
+.venv-quant/bin/python -m unittest \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_self_consistent_noncanonical_training_configuration \
+  -v
+```
+
+Output before the production change:
+
+```text
+test_summary_rejects_self_consistent_noncanonical_training_configuration ...
+  (configuration={'scheduler_factor': 0.4}) ... FAIL
+AssertionError: 0 == 0
+Ran 1 test in 9.040s
+FAILED (failures=1)
+```
+
+The pre-existing window, stride, batch-size, and epoch mutations continued to
+pass their rejection assertions; only the newly covered scheduler mutation was
+incorrectly accepted.
+
+### GREEN
+
+Focused regression command:
+
+```bash
+.venv-quant/bin/python -m unittest \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_self_consistent_noncanonical_training_configuration \
+  -v
+```
+
+Output:
+
+```text
+Ran 1 test in 9.187s
+OK
+```
+
+Complete Task 2 evaluator/summarizer command:
+
+```bash
+.venv-quant/bin/python -m unittest \
+  tests.test_stage1.Stage1EvaluationTests \
+  tests.test_stage1.Stage1SummaryTests \
+  -v
+```
+
+Output:
+
+```text
+Ran 11 tests in 39.619s
+OK
+```
+
+Full-suite command:
+
+```bash
+.venv-quant/bin/python -m unittest discover -s tests -v
+```
+
+Output:
+
+```text
+Ran 30 tests in 44.617s
+OK
+```
+
+### Frozen artifact re-verification
+
+Commands:
+
+```bash
+.venv-quant/bin/python scripts/summarize_stage1.py \
+  --run-dir runs/canonical_retrain/20260905T053626Z/stage1-pilot \
+  --data datasets/nasdaq_multivariate.csv \
+  --output runs/canonical_retrain/20260905T053626Z/stage1-pilot/summary.json
+
+.venv-quant/bin/python scripts/summarize_stage1.py \
+  --run-dir runs/canonical_retrain/20260905T053626Z/stage1-full \
+  --data datasets/nasdaq_multivariate.csv \
+  --output runs/canonical_retrain/20260905T053626Z/stage1-full/summary.json
+```
+
+Both exited `0`. The ignored summary hashes remain
+`266f6b847b225d15259c43a13a0e0eb1b435861c1b83a820157f1e0b5b462225`
+for pilot and
+`3360c7d8de35336e34ae58fa7f1d04d346ce61d4379c1d14cbbd943f3e1f02ba`
+for full. No run artifact values were changed, no training was rerun, and no
+run result is staged.

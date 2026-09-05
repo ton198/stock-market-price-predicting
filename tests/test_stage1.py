@@ -668,6 +668,7 @@ class Stage1SummaryTests(unittest.TestCase):
             {"train_stride": 2},
             {"batch_size": 64},
             {"epochs": 299},
+            {"scheduler_factor": 0.4},
         )
         for configuration in configurations:
             with self.subTest(configuration=configuration), tempfile.TemporaryDirectory() as temporary_directory:
