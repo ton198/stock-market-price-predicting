@@ -39,6 +39,7 @@ from scripts.train_dqn import (
     validation_window_starts,
 )
 from quant_pipeline.evaluator import load_prediction_csv
+from quant_pipeline.signals import SignalNormalizer, fit_signal_normalizer
 
 
 PILOT_SEEDS = (42, 59, 76)
@@ -256,6 +257,7 @@ def _validate_seed_manifest(
     stage1_summary_path: Path,
     selected_stage1: Path,
     stage1_selection: Mapping[str, Any],
+    expected_signal_normalizer: SignalNormalizer,
     *,
     pilot: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], np.ndarray]:
@@ -301,6 +303,28 @@ def _validate_seed_manifest(
         or float(normalizer.get("scale", 0.0)) <= 0.0
     ):
         raise ValueError(f"{seed_dir}: signal normalizer is not train-only metadata")
+    try:
+        actual_mean = float(normalizer["mean"])
+        actual_scale = float(normalizer["scale"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{seed_dir}: signal normalizer statistics are malformed") from exc
+    if not (
+        math.isclose(
+            actual_mean,
+            float(expected_signal_normalizer.mean_),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            actual_scale,
+            float(expected_signal_normalizer.scale_),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError(
+            f"{seed_dir}: signal normalizer statistics do not match the dense train stream"
+        )
     if manifest.get("input_streams") != {
         "train": "predictions_train_dense.csv",
         "validation": "predictions_validation.csv",
@@ -450,6 +474,13 @@ def summarize_dqn_run(
     )
     if stage1_dates != expected_test_dates:
         raise ValueError("selected Stage 1 test probabilities are misaligned")
+    dense_train_dates, dense_train_probabilities = load_prediction_csv(
+        selected_stage1 / "predictions_train_dense.csv"
+    )
+    expected_train_dates = tuple(dataset.dates[59 : dataset.splits.train.stop])
+    if dense_train_dates != expected_train_dates:
+        raise ValueError("selected Stage 1 dense train probabilities are misaligned")
+    expected_signal_normalizer = fit_signal_normalizer(dense_train_probabilities)
 
     pilot, seeds, seed_directories = _discover_seed_directories(directory)
     per_seed: list[dict[str, Any]] = []
@@ -463,6 +494,7 @@ def summarize_dqn_run(
             stage1_summary_file,
             selected_stage1,
             selection,
+            expected_signal_normalizer,
             pilot=pilot,
         )
         relative_manifest = f"seed-{seed:03d}/manifest.json"

@@ -667,6 +667,13 @@ class DQNSummaryTests(unittest.TestCase):
         )
         test_dates = tuple(self.dataset.dates[self.dataset.splits.test])
         probabilities = np.linspace(0.4, 0.6, len(test_dates))
+        train_dates = tuple(self.dataset.dates[59 : self.dataset.splits.train.stop])
+        train_probabilities = np.linspace(0.4, 0.6, len(train_dates))
+        write_prediction(
+            selected / "predictions_train_dense.csv",
+            train_dates,
+            train_probabilities,
+        )
         write_prediction(selected / "predictions_test.csv", test_dates, probabilities)
         return stage1_run / "summary.json", selected, selection
 
@@ -720,6 +727,8 @@ class DQNSummaryTests(unittest.TestCase):
             }
             for step in range(10_000, timesteps + 1, 10_000)
         ]
+        train_probabilities = np.linspace(0.4, 0.6, 6133)
+        train_normalizer = fit_signal_normalizer(train_probabilities)
         manifest = {
             "status": "research_only",
             "portfolio_publication_allowed": False,
@@ -737,8 +746,8 @@ class DQNSummaryTests(unittest.TestCase):
             "signal_normalizer": {
                 "fit_split": "train_dense",
                 "fit_filename": "predictions_train_dense.csv",
-                "mean": 0.5,
-                "scale": 0.1,
+                "mean": float(train_normalizer.mean_),
+                "scale": float(train_normalizer.scale_),
                 "rows": 6133,
             },
             "input_streams": {
@@ -910,6 +919,19 @@ class DQNSummaryTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "selected checkpoint"):
+                summarize_dqn_run(self.data_path, stage1_summary, run_dir)
+
+    def test_full_summary_rejects_wrong_train_signal_normalizer_statistics(self):
+        from scripts.summarize_dqn import summarize_dqn_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage1_summary, run_dir = self.make_run(Path(temporary), pilot=False)
+            manifest_path = run_dir / "seed-042" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["signal_normalizer"]["mean"] = 12345.0
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "normalizer"):
                 summarize_dqn_run(self.data_path, stage1_summary, run_dir)
 
 
