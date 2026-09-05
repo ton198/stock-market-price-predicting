@@ -74,18 +74,38 @@ def make_stage1_seed_artifacts(
     dataset: PreparedDataset,
     seed: int,
     validation_loss: float,
+    *,
+    hyperparameter_overrides: dict[str, object] | None = None,
 ) -> None:
     seed_dir = run_dir / f"seed-{seed:03d}"
     seed_dir.mkdir(parents=True)
+    hyperparameters = {
+        "epochs": 300,
+        "batch_size": 32,
+        "window_size": 60,
+        "train_stride": 3,
+        "learning_rate": 1e-3,
+        "early_stopping_patience": 20,
+        "gradient_clip_norm": 1.0,
+        "scheduler_factor": 0.5,
+        "scheduler_patience": 10,
+        "scheduler_min_lr": 1e-5,
+    }
+    hyperparameters.update(hyperparameter_overrides or {})
+    window_size = int(hyperparameters["window_size"])
+    train_stride = int(hyperparameters["train_stride"])
+    train_start = window_size - 1
     stream_dates = {
-        "train_fit": dataset.dates[59 : dataset.splits.train.stop : 3],
-        "train_dense": dataset.dates[59 : dataset.splits.train.stop],
+        "train_fit": dataset.dates[
+            train_start : dataset.splits.train.stop : train_stride
+        ],
+        "train_dense": dataset.dates[train_start : dataset.splits.train.stop],
         "validation": dataset.dates[dataset.splits.validation],
         "test": dataset.dates[dataset.splits.test],
     }
     stream_slices = {
-        "train_fit": slice(59, dataset.splits.train.stop, 3),
-        "train_dense": slice(59, dataset.splits.train.stop),
+        "train_fit": slice(train_start, dataset.splits.train.stop, train_stride),
+        "train_dense": slice(train_start, dataset.splits.train.stop),
         "validation": dataset.splits.validation,
         "test": dataset.splits.test,
     }
@@ -97,12 +117,50 @@ def make_stage1_seed_artifacts(
     }
     for name, dates in stream_dates.items():
         targets = np.asarray(dataset.targets[stream_slices[name]], dtype=np.float64)
-        probabilities = np.where(targets == 1.0, 0.55, 0.45)
+        if name == "validation":
+            true_class_probability = np.exp(-validation_loss)
+            probabilities = np.where(
+                targets == 1.0,
+                true_class_probability,
+                1.0 - true_class_probability,
+            )
+        else:
+            probabilities = np.where(targets == 1.0, 0.55, 0.45)
         write_predictions(seed_dir / filenames[name], dates, probabilities)
 
-    (seed_dir / "checkpoint.pt").write_bytes(b"fixture")
+    torch.save(
+        {
+            "model_state_dict": {},
+            "seed": seed,
+            "feature_names": tuple(DEFAULT_FEATURE_COLS),
+            "macro_feature_names": (
+                "FedRate",
+                "FedRate_chg20",
+                "FedRate_chg60",
+                "TNX",
+                "Yield_slope",
+                "VIX",
+                "VIX_percentile",
+            ),
+            "macro_feature_indices": (14, 28, 29, 13, 23, 12, 17),
+            "model": {"feature_count": 30},
+        },
+        seed_dir / "checkpoint.pt",
+    )
     (seed_dir / "history.json").write_text(
-        json.dumps({"best_validation_loss": validation_loss}) + "\n",
+        json.dumps(
+            {
+                "best_epoch": 3,
+                "best_validation_loss": validation_loss,
+                "epochs": [
+                    {"epoch": 1, "validation_loss": validation_loss + 0.03},
+                    {"epoch": 2, "validation_loss": validation_loss + 0.01},
+                    {"epoch": 3, "validation_loss": validation_loss},
+                    {"epoch": 4, "validation_loss": validation_loss + 0.02},
+                ],
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     metrics = {
@@ -121,7 +179,7 @@ def make_stage1_seed_artifacts(
         name: {
             "filename": filenames[name],
             "rows": len(dates),
-            "cadence": 3 if name == "train_fit" else 1,
+            "cadence": train_stride if name == "train_fit" else 1,
             "role": (
                 "optimizer-sampling diagnostic only"
                 if name == "train_fit"
@@ -137,7 +195,26 @@ def make_stage1_seed_artifacts(
     manifest = {
         "seed": seed,
         "checkpoint_selection": "lowest validation loss",
-        "hyperparameters": {"window_size": 60, "train_stride": 3},
+        "dataset_fingerprint_sha256": (
+            "f4e3fe6d621f82525c977c427e4f61deb96b420ab2c3b34361419f1cc63c4f02"
+        ),
+        "feature_names": list(DEFAULT_FEATURE_COLS),
+        "splits": {
+            "train": {"start": 0, "stop": 6192, "step": None},
+            "validation": {"start": 6192, "stop": 7076, "step": None},
+            "test": {"start": 7076, "stop": 8847, "step": None},
+        },
+        "protocol": {
+            "origin": "fixed",
+            "split_basis": "prediction_anchor",
+            "label_overlap_purged_at_boundaries": False,
+            "exact_retraining_at_each_boundary": False,
+            "qualification": (
+                "Fixed-origin, anchor-based, unpurged offline research contract; "
+                "not an exact retraining-at-boundary simulation."
+            ),
+        },
+        "hyperparameters": hyperparameters,
         "streams": streams,
         "artifacts": [
             "checkpoint.pt",
@@ -553,6 +630,131 @@ class Stage1SummaryTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("contains NaN or infinity", completed.stderr)
             self.assertFalse(output.exists())
+
+    def test_summary_rejects_missing_or_altered_selection_provenance(self):
+        mutations = {
+            "missing_protocol": lambda manifest: manifest.pop("protocol"),
+            "test_based_selection": lambda manifest: manifest.update(
+                {"checkpoint_selection": "lowest test loss"}
+            ),
+            "wrong_feature_order": lambda manifest: manifest["feature_names"].reverse(),
+            "wrong_split": lambda manifest: manifest["splits"]["validation"].update(
+                {"stop": 7075}
+            ),
+            "wrong_dataset_fingerprint": lambda manifest: manifest.update(
+                {"dataset_fingerprint_sha256": "0" * 64}
+            ),
+        }
+        for mutation_name, mutate in mutations.items():
+            with self.subTest(mutation=mutation_name), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = Path(temporary_directory) / "stage1-pilot"
+                for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                    make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+                manifest_path = run_dir / "seed-017" / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+                output = run_dir / "summary.json"
+
+                completed = self.run_summarizer(run_dir, output)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("canonical", completed.stderr)
+                self.assertFalse(output.exists())
+
+    def test_summary_rejects_self_consistent_noncanonical_training_configuration(self):
+        configurations = (
+            {"window_size": 30},
+            {"train_stride": 2},
+            {"batch_size": 64},
+            {"epochs": 299},
+        )
+        for configuration in configurations:
+            with self.subTest(configuration=configuration), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = Path(temporary_directory) / "stage1-pilot"
+                for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                    make_stage1_seed_artifacts(
+                        run_dir,
+                        self.dataset,
+                        seed,
+                        loss,
+                        hyperparameter_overrides=configuration,
+                    )
+                output = run_dir / "summary.json"
+
+                completed = self.run_summarizer(run_dir, output)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("canonical hyperparameters", completed.stderr)
+                self.assertFalse(output.exists())
+
+    def test_summary_rejects_noncanonical_dataset_sha(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            altered_data = root / "nasdaq_multivariate.csv"
+            shutil.copy2(self.data_path, altered_data)
+            altered_data.write_bytes(altered_data.read_bytes() + b"\n")
+            run_dir = root / "stage1-pilot"
+            for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+            output = run_dir / "summary.json"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/summarize_stage1.py",
+                    "--run-dir",
+                    str(run_dir),
+                    "--data",
+                    str(altered_data),
+                    "--output",
+                    str(output),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("canonical dataset SHA-256", completed.stderr)
+            self.assertFalse(output.exists())
+
+    def test_summary_rejects_uncorroborated_validation_selection_evidence(self):
+        mutations = ("metrics_loss", "history_loss", "best_epoch", "checkpoint_seed")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = Path(temporary_directory) / "stage1-pilot"
+                for seed, loss in ((0, 0.69), (17, 0.67), (34, 0.68)):
+                    make_stage1_seed_artifacts(run_dir, self.dataset, seed, loss)
+                seed_dir = run_dir / "seed-017"
+                if mutation == "metrics_loss":
+                    path = seed_dir / "metrics.json"
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["validation_loss"] += 1e-4
+                    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                elif mutation == "history_loss":
+                    path = seed_dir / "history.json"
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["best_validation_loss"] += 1e-4
+                    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                elif mutation == "best_epoch":
+                    path = seed_dir / "metrics.json"
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["best_epoch"] = 2
+                    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                else:
+                    path = seed_dir / "checkpoint.pt"
+                    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+                    checkpoint["seed"] = 999
+                    torch.save(checkpoint, path)
+                output = run_dir / "summary.json"
+
+                completed = self.run_summarizer(run_dir, output)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("selection evidence", completed.stderr)
+                self.assertFalse(output.exists())
 
     def test_full_summary_selects_validation_loss_then_smallest_seed(self):
         seeds = (0, 17, 34, 51, 68, 85, 102, 119, 136, 153)

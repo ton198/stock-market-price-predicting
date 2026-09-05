@@ -353,3 +353,166 @@ An independent inventory check found:
    the training/evaluation workflow was unaffected.
 5. Publication under `results/canonical/stage1/` remains intentionally pending
    external review. No result copies or results README were created.
+
+## Review fix round: provenance and canonical-contract enforcement
+
+### Fix status
+
+The three blocking review findings were addressed in one code/test round.
+Existing pilot and full artifacts pass the strengthened audit, so the change
+does not invalidate checkpoints or predictions and the ten-seed training was
+not rerun.
+
+### Root-cause verification
+
+The reviewed implementation previously:
+
+- treated manifest `window_size` and `train_stride` as trusted inputs when
+  deriving expected dates;
+- did not require the canonical protocol, checkpoint-selection criterion,
+  raw dataset identity, prepared-dataset fingerprint, feature order, or split
+  metadata;
+- checked only two manifest hyperparameters; and
+- selected directly from `metrics["validation_loss"]` without corroborating
+  history, best epoch, checkpoint metadata, or validation prediction BCE.
+
+The frozen artifacts were measured before choosing a tolerance. Across all 13
+pilot/full seed artifacts, the maximum absolute metrics-to-history validation
+loss delta was `7.01e-8`, the maximum metrics-to-prediction BCE delta was
+`6.38e-8`, and every metrics/history best epoch agreed. The fix therefore uses
+a documented absolute tolerance of `1e-7` with zero relative tolerance.
+
+### Production changes
+
+`scripts/summarize_stage1.py` now requires:
+
+- canonical raw data SHA-256
+  `3f8f3dcd571fceca215778333d6c97d45352bb2544ebc4c2d7467d79cf540ef7`;
+- prepared-dataset fingerprint
+  `f4e3fe6d621f82525c977c427e4f61deb96b420ab2c3b34361419f1cc63c4f02`;
+- horizon `20`, exactly 30 features in `DEFAULT_FEATURE_COLS` order, and exact
+  chronological slices train `[0,6192)`, validation `[6192,7076)`, and test
+  `[7076,8847)`;
+- requested epochs `300`, batch size `32`, window size `60`, train stride `3`,
+  learning rate `1e-3`, and early-stopping patience `20`;
+- the exact fixed-origin, prediction-anchor, unpurged, not-exact-boundary-
+  retraining protocol object;
+- manifest checkpoint selection exactly `lowest validation loss`, rejecting
+  absent, changed, or test-based criteria; and
+- checkpoint seed/feature/model metadata plus internally consistent history
+  epoch sequence, best epoch, metrics epoch count, history best loss, metrics
+  validation loss, selected history row loss, and independently recomputed
+  validation prediction BCE.
+
+Expected prediction anchors now come only from canonical constants, never from
+manifest-provided window or stride values. Aggregate validation loss and the
+full-run selection key use `corroborated_validation_loss`; ties still resolve
+by ascending seed.
+
+The synthetic fixture now contains the complete canonical manifest protocol,
+configuration, fingerprint, features, splits, loadable checkpoint metadata,
+history epochs, and predictions whose validation BCE equals the declared loss.
+
+### Focused RED evidence
+
+Command:
+
+```bash
+.venv-quant/bin/python -m unittest \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_missing_or_altered_selection_provenance \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_self_consistent_noncanonical_training_configuration \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_noncanonical_dataset_sha \
+  tests.test_stage1.Stage1SummaryTests.test_summary_rejects_uncorroborated_validation_selection_evidence \
+  -v
+```
+
+Before production changes, result: `FAILED (failures=14)` in `8.769s`.
+Every mutation was incorrectly accepted with return code `0`:
+
+- missing protocol;
+- test-based checkpoint selection;
+- wrong feature order, split metadata, or prepared-dataset fingerprint;
+- self-consistent window size `30` or train stride `2` streams;
+- batch size `64` or requested epochs `299`;
+- canonical CSV with an appended newline and therefore a different raw SHA;
+- metrics/history validation-loss mismatches;
+- best-epoch mismatch; and
+- checkpoint seed mismatch.
+
+The noncanonical window/stride fixtures deliberately rewrote their prediction
+dates and manifest stream metadata consistently, proving the old summarizer
+trusted the altered configuration rather than merely catching incidental date
+misalignment.
+
+### Focused GREEN evidence
+
+The same four-method command after implementation produced:
+
+```text
+Ran 4 tests in 24.483s
+OK
+```
+
+The complete Task 2 evaluator/summarizer classes were then run:
+
+```bash
+.venv-quant/bin/python -m unittest \
+  tests.test_stage1.Stage1EvaluationTests \
+  tests.test_stage1.Stage1SummaryTests \
+  -v
+```
+
+Result:
+
+```text
+Ran 11 tests in 37.093s
+OK
+```
+
+This includes the unchanged exact-test evaluator behavior, validation split
+helper, evaluator immutability, exact artifact inventory, atomic output,
+pilot non-selection, and full validation-loss/seed tie-break tests.
+
+Full-suite command:
+
+```bash
+.venv-quant/bin/python -m unittest discover -s tests -v
+```
+
+Result:
+
+```text
+Ran 30 tests in 41.353s
+OK
+```
+
+### Existing artifact compatibility
+
+The strengthened summarizer was run against both frozen directories:
+
+```bash
+.venv-quant/bin/python scripts/summarize_stage1.py \
+  --run-dir runs/canonical_retrain/20260905T053626Z/stage1-pilot \
+  --data datasets/nasdaq_multivariate.csv \
+  --output runs/canonical_retrain/20260905T053626Z/stage1-pilot/summary.json
+
+.venv-quant/bin/python scripts/summarize_stage1.py \
+  --run-dir runs/canonical_retrain/20260905T053626Z/stage1-full \
+  --data datasets/nasdaq_multivariate.csv \
+  --output runs/canonical_retrain/20260905T053626Z/stage1-full/summary.json
+```
+
+Both exited `0`. The regenerated summaries record all strengthened technical
+checks as passed. The pilot still emits no selection; the full run still
+selects seed `119` at corroborated validation loss `0.6920855045318604`; both
+validation-only Stage 2 decisions remain `hold`.
+
+Updated ignored summary SHA-256 values:
+
+- pilot: `266f6b847b225d15259c43a13a0e0eb1b435861c1b83a820157f1e0b5b462225`;
+- full: `3360c7d8de35336e34ae58fa7f1d04d346ce61d4379c1d14cbbd943f3e1f02ba`.
+
+No training command was rerun because all existing immutable per-seed
+checkpoint, history, metric, manifest, and prediction evidence satisfied the
+strengthened contract. No result artifact, model, portfolio, README,
+methodology file, notebook, or DQN file is included in this fix.
