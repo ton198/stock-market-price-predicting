@@ -113,3 +113,92 @@ Results:
 - The task intentionally stops before Task 2: no pilot, full ten-seed training, summarization, seed selection, or canonical evaluation run was performed.
 - CPU deterministic reproducibility is tested. CUDA execution and cross-device bitwise identity were not tested in this CPU-only environment.
 - The shared checkout remains deliberately dirty. Several supporting canonical pipeline files were already untracked and were preserved outside this task commit, exactly as requested; the implementation was verified against the complete shared checkout state.
+
+## Review fix report — clean-checkout dependency and protocol manifest
+
+### Review findings verified
+
+The clean-checkout dependency was reproduced from a `git archive HEAD` extraction. Running the Task 1 environment's Python from that extraction with:
+
+```text
+/home/doctor235/intern-workspace/stock-market-price-predicting/.venv-quant/bin/python -c "import quant_pipeline.stage1"
+```
+
+exited 1 with `ModuleNotFoundError: No module named 'quant_pipeline.metrics'`. `git ls-tree` confirmed that the reviewed head contained only `quant_pipeline/data.py` and `quant_pipeline/stage1.py` under the package, while the dirty shared checkout's `quant_pipeline/metrics.py` was untracked and masked the defect.
+
+Inspection also confirmed that `manifest.json` recorded split boundaries but had no fields qualifying the split protocol as fixed-origin, prediction-anchor based, unpurged at label-overlap boundaries, and not an exact retraining-at-boundary simulation.
+
+### Fix implementation
+
+- Removed the import and use of untracked `quant_pipeline.metrics.classification_metrics`. `metrics.json` retains the Task 1 artifact contract and its train-fit, train-dense, validation, and test loss diagnostics. Canonical classification evaluation remains outside this trainer and is performed by the planned Task 2 canonical evaluator.
+- Strengthened the CLI test to run from an isolated temporary package containing only Task 1's committed `data.py`, `stage1.py`, and `train_stage1.py`. This prevents unrelated dirty files from masking future clean-checkout dependencies.
+- Added a `protocol` object to every per-seed manifest with these explicit fields:
+  - `origin: "fixed"`;
+  - `split_basis: "prediction_anchor"`;
+  - `label_overlap_purged_at_boundaries: false`;
+  - `exact_retraining_at_each_boundary: false`;
+  - qualification: `Fixed-origin, anchor-based, unpurged offline research contract; not an exact retraining-at-boundary simulation.`
+- Added a focused artifact assertion for the complete literal protocol object.
+- Preserved the user's untracked `quant_pipeline/metrics.py` and all other unrelated dirty paths; none were staged.
+
+### Fix TDD evidence
+
+Clean-checkout dependency RED:
+
+```text
+.venv-quant/bin/python -m unittest tests.test_stage1.Stage1ModelContractTests.test_stage1_cli_exposes_canonical_arguments_with_only_task1_modules -v
+```
+
+Result: exit 1. The isolated CLI failed while importing `quant_pipeline.stage1`, with `ModuleNotFoundError: No module named 'quant_pipeline.metrics'`.
+
+Clean-checkout dependency GREEN after removing the dependency:
+
+```text
+.venv-quant/bin/python -m unittest tests.test_stage1.Stage1ModelContractTests.test_stage1_cli_exposes_canonical_arguments_with_only_task1_modules -v
+```
+
+Result: exit 0; 1/1 passed in 1.420 seconds.
+
+Protocol metadata RED:
+
+```text
+.venv-quant/bin/python -m unittest tests.test_stage1.Stage1ModelContractTests.test_seed_trainer_writes_aligned_finite_reproducible_predictions -v
+```
+
+Result: exit 1 with `KeyError: 'protocol'`, proving the generated manifest lacked the required observable contract.
+
+Protocol metadata GREEN after adding the explicit fields:
+
+```text
+.venv-quant/bin/python -m unittest tests.test_stage1.Stage1ModelContractTests.test_seed_trainer_writes_aligned_finite_reproducible_predictions -v
+```
+
+Result: exit 0; 1/1 passed in 0.815 seconds.
+
+### Fix verification
+
+Focused suite:
+
+```text
+.venv-quant/bin/python -m unittest tests.test_stage1 -v
+```
+
+Result: exit 0; 8/8 passed in 2.748 seconds on the final pre-commit rerun.
+
+Full suite:
+
+```text
+.venv-quant/bin/python -m unittest discover -s tests -v
+```
+
+Result: exit 0; 19/19 passed in 3.332 seconds on the final pre-commit rerun.
+
+`.venv-quant/bin/python -m compileall -q quant_pipeline scripts tests` and `git diff --check` also exited 0.
+
+### Fix self-review and concerns
+
+- The isolated CLI test exercises actual imports and argument parsing rather than searching source text or mocking dependencies.
+- Removing or reintroducing a non-Task-1 package import now breaks the isolated test.
+- Omitting or changing any mandatory protocol field now breaks the manifest artifact test.
+- The trainer still does not perform Task 2 canonical classification evaluation or seed aggregation.
+- No real 300-epoch or CUDA training run was performed as part of this review fix.

@@ -23,7 +23,6 @@ from .data import (
     SequenceWindows,
     build_sequence_windows,
 )
-from .metrics import classification_metrics
 
 
 MACRO_FEATURE_NAMES: tuple[str, ...] = (
@@ -414,10 +413,6 @@ def fit_stage1_seed(
         "train_dense_loss": losses["train_dense"],
         "validation_loss": losses["validation"],
         "test_loss": losses["test"],
-        "classification": {
-            name: classification_metrics(prediction_windows[name].targets, probabilities)
-            for name, probabilities in predictions.items()
-        },
     }
     history = {
         "best_epoch": best_epoch,
@@ -451,6 +446,16 @@ def fit_stage1_seed(
         "splits": {
             name: _slice_metadata(row_slice)
             for name, row_slice in dataset.splits.as_dict().items()
+        },
+        "protocol": {
+            "origin": "fixed",
+            "split_basis": "prediction_anchor",
+            "label_overlap_purged_at_boundaries": False,
+            "exact_retraining_at_each_boundary": False,
+            "qualification": (
+                "Fixed-origin, anchor-based, unpurged offline research contract; "
+                "not an exact retraining-at-boundary simulation."
+            ),
         },
         "device": {"requested": device, "resolved": str(resolved_device)},
         "torch_version": torch.__version__,

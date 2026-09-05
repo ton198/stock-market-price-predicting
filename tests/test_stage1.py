@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -235,16 +236,40 @@ class Stage1ModelContractTests(unittest.TestCase):
             self.assertEqual(manifest["seed"], 7)
             self.assertEqual(manifest["streams"]["train_dense"]["cadence"], 1)
             self.assertEqual(manifest["streams"]["train_fit"]["cadence"], 3)
+            self.assertEqual(
+                manifest["protocol"],
+                {
+                    "origin": "fixed",
+                    "split_basis": "prediction_anchor",
+                    "label_overlap_purged_at_boundaries": False,
+                    "exact_retraining_at_each_boundary": False,
+                    "qualification": (
+                        "Fixed-origin, anchor-based, unpurged offline research contract; "
+                        "not an exact retraining-at-boundary simulation."
+                    ),
+                },
+            )
             self.assertEqual(metrics["validation_loss"], history["best_validation_loss"])
 
-    def test_stage1_cli_exposes_canonical_training_arguments(self):
-        completed = subprocess.run(
-            [sys.executable, "scripts/train_stage1.py", "--help"],
-            cwd=PROJECT_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+    def test_stage1_cli_exposes_canonical_arguments_with_only_task1_modules(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            isolated_root = Path(temporary_directory)
+            isolated_package = isolated_root / "quant_pipeline"
+            isolated_scripts = isolated_root / "scripts"
+            isolated_package.mkdir()
+            isolated_scripts.mkdir()
+            (isolated_package / "__init__.py").write_text("", encoding="utf-8")
+            for filename in ("data.py", "stage1.py"):
+                shutil.copy2(PROJECT_ROOT / "quant_pipeline" / filename, isolated_package)
+            shutil.copy2(PROJECT_ROOT / "scripts" / "train_stage1.py", isolated_scripts)
+
+            completed = subprocess.run(
+                [sys.executable, "scripts/train_stage1.py", "--help"],
+                cwd=isolated_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         for option in (
