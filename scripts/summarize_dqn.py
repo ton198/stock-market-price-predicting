@@ -468,6 +468,7 @@ def summarize_dqn_run(
         relative_manifest = f"seed-{seed:03d}/manifest.json"
         seed_row: dict[str, Any] = {
             "seed": seed,
+            "timesteps": manifest["timesteps"],
             "manifest": relative_manifest,
             "device": dict(manifest["device"]),
             "wall_clock_seconds": float(manifest["wall_clock_seconds"]),
@@ -523,6 +524,15 @@ def summarize_dqn_run(
         "pilot": pilot,
         "run_kind": "pilot" if pilot else "full",
         "excluded_from_final_aggregate": pilot,
+        "review": {
+            "status": "pending",
+            "readme_created": False,
+            "readme_policy": "results/canonical/dqn/README.md is deferred until code/run review",
+        },
+        "aggregation_convention": {
+            "std_ddof": 0,
+            "weighting": "equal weight per predeclared seed; pilots excluded from full aggregate",
+        },
         "seeds": list(seeds),
         "stage1": {
             "summary": str(stage1_summary_file),
@@ -542,6 +552,9 @@ def summarize_dqn_run(
             "transaction_cost": CANONICAL_TRANSACTION_COST,
             "slippage": CANONICAL_SLIPPAGE,
             "position_range": [-1.0, 1.0],
+            "turnover": "abs(position[t] - position[t-1]); initial previous position is cash (0)",
+            "cost_application": "equity[t] * turnover[t] * (transaction_cost + slippage)",
+            "final_anchor": "exported only; no realized interval, turnover charge, or forced liquidation",
         },
         "per_seed": per_seed,
         "validation_checkpoint_records": checkpoint_rows,
