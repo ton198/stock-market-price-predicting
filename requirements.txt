@@ -1,0 +1,2 @@
+# Core data-contract and evaluation utilities.
+numpy>=1.24

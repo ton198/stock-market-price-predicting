@@ -1,6 +1,13 @@
 # DQN Trading Agent — Notebook Explanation
 
-> Source: `source_code/stage2/dqn_252_colab.ipynb`
+> **Historical artifact notice (2026-09):** the output cells and metrics in
+> this document were produced before the repository adopted the canonical
+> leakage-aware evaluation contract. They are retained for provenance only;
+> do not cite the old accuracy, return, or Sharpe values as current results.
+> See [`README.md`](README.md) and [`METHODOLOGY.md`](METHODOLOGY.md) for the
+> corrected data, split, signal-normalization, and backtest rules.
+
+> Source: [`source_code/stage2/DQN.ipynb`](source_code/stage2/DQN.ipynb)
 
 ---
 
@@ -20,8 +27,8 @@ The LSTM signal is computed **rolling**: at each day `t`, the model uses the **l
 | File | Purpose |
 |------|---------|
 | `datasets/nasdaq_multivariate.csv` | Raw NASDAQ price + macro dataset |
-| `models/stage1_model.pth` | Pre-trained LSTM weights |
-| `models/stage1_scaler.joblib` | Fitted `StandardScaler` for LSTM features |
+| `models/stage1_model_canonical.pth` | LSTM weights trained under the canonical contract |
+| `models/stage1_scaler_canonical.joblib` | Training-fitted `StandardScaler` for LSTM features |
 
 ---
 
@@ -47,11 +54,11 @@ The notebook is designed to run on **Google Colab**. All files live under `BASE_
 | Variable | Path |
 |----------|------|
 | `CSV_PATH` | `…/datasets/nasdaq_multivariate.csv` |
-| `SCALER_PATH` | `…/models/stage1_scaler.joblib` |
-| `WEIGHTS_PATH` | `…/models/stage1_model.pth` |
-| `DQN_SAVE` | `…/models/dqn_nasdaq_252.zip` |
-| `CURVE_SAVE` | `…/results/dqn_252_reward_curve.png` |
-| `EQUITY_SAVE` | `…/results/dqn_252_equity_curves.png` |
+| `SCALER_PATH` | `…/models/stage1_scaler_canonical.joblib` |
+| `WEIGHTS_PATH` | `…/models/stage1_model_canonical.pth` |
+| `DQN_SAVE` | `…/models/dqn_nasdaq_canonical.zip` |
+| `CURVE_SAVE` | `…/results/dqn_canonical_reward_curve.png` |
+| `EQUITY_SAVE` | `…/results/dqn_canonical_equity_curves.png` |
 
 After mounting, the cell checks each of the three input paths and prints `[OK]` or `[MISSING]`. The run output shows all three as `[OK]`.
 
@@ -121,7 +128,7 @@ Reads the CSV and engineers additional columns that are not in the raw file:
 | Column | Formula |
 |--------|---------|
 | `Forward_20d` | `Close.shift(-20) / Close - 1` |
-| `target` | 1 if `Forward_20d > median(Forward_20d)` else 0 |
+| `target` | 1 if `Forward_20d` exceeds the median computed on the earliest 70% of rows |
 | `Regime` | 1 if `Close > Close.rolling(60).mean()` |
 | `Momentum_20d` | `Close / Close.shift(20) - 1` |
 | `Momentum_60d` | `Close / Close.shift(60) - 1` |
@@ -137,7 +144,10 @@ Reads the CSV and engineers additional columns that are not in the raw file:
 | `FedRate_chg60` | `FedRate.diff(60)` |
 | `Gap` | `Open / Close.shift(1) - 1` |
 
-After dropping NaN rows the dataset has **8,848 rows** with a target positive rate of **0.505** (nearly balanced binary classification).
+After dropping NaN rows, the target threshold is fitted on the chronological
+training prefix only. The exact row counts and threshold are emitted by
+`scripts/audit_pipeline.py`; the historical output count in this document is
+not a current result.
 
 ### `load_lstm_model`
 
@@ -149,7 +159,8 @@ Loads weights from disk with `torch.load(..., map_location='cpu')`, applies `loa
 
 ### `generate_prob_series`
 
-This function runs inference over the entire DataFrame and returns three aligned arrays.
+This function runs inference over the entire DataFrame and returns three aligned
+arrays plus the `(mean, std)` signal statistics used for normalization.
 
 **Step-by-step logic:**
 
@@ -160,14 +171,19 @@ This function runs inference over the entire DataFrame and returns three aligned
 
 **Signal normalization:**
 
-Raw probabilities are concentrated (observed: mean=0.643, std=0.120 for training; mean=0.673, std=0.123 for test). To spread the signal, z-scoring followed by tanh is applied:
+Raw probabilities are concentrated. To spread the signal, z-scoring followed by
+tanh is applied using statistics fitted on the training stream and reused
+unchanged for validation/test:
 
 ```python
-z          = (raw_probs - raw_probs.mean()) / (raw_probs.std() + 1e-8)
+signal_stats = (float(raw_probs.mean()), float(raw_probs.std()))  # training call only
+signal_mean, signal_std = signal_stats
+z          = (raw_probs - signal_mean) / (signal_std + 1e-8)
 probs_norm = (0.5 + 0.5 * np.tanh(z)).astype(np.float32)
 ```
 
-Result: normalized probabilities near mean=0.486, std=0.319 (training) and mean=0.486, std=0.328 (test).
+The test call receives the training `signal_stats`; it must not recompute a
+test-period mean or standard deviation.
 
 **Extra features computed:**
 
@@ -183,6 +199,7 @@ These three are stacked into `extra_features` of shape `(N, 3)`.
 - `probs_norm`: shape `(N,)` — normalized LSTM probabilities in `[0, 1]`
 - `prices`: shape `(N,)` — Close prices aligned to `probs_norm`
 - `extra_features`: shape `(N, 3)`
+- `signal_stats`: `(training_mean, training_std)` persisted for test inference
 
 ---
 
@@ -196,16 +213,17 @@ These three are stacked into `extra_features` of shape `(N, 3)`.
 | `SIGNAL_BONUS_W` | 20 | Weight of the signal alignment bonus in reward |
 | `VOL_PENALTY_W` | 0 | Weight of the volatility penalty (disabled) |
 | `MARGIN_RATE` | `0.02 / 252` | Daily interest rate charged on negative cash |
-| `N_ACTIONS` | 31 | Total number of discrete actions |
+| `N_ACTIONS` | 21 | Total number of discrete actions |
+| `TRANSACTION_COST` | 0.001 | Proportional turnover cost |
+| `SLIPPAGE` | 0.0005 | Proportional execution slippage |
 
 ### Action space
 
-31 discrete actions mapped via `ACTION_MAP = {i: (i - 10) * 0.1 for i in range(31)}`:
+21 discrete actions mapped via `ACTION_MAP = {i: (i - 10) * 0.1 for i in range(21)}`:
 
 - Action 0 → position −1.0 (100% short)
 - Action 10 → position 0.0 (all cash)
 - Action 20 → position +1.0 (fully invested)
-- Action 30 → position +2.0 (2× leveraged long)
 
 ### `NASDAQTradingEnv`
 
@@ -230,7 +248,7 @@ Inherits from `gymnasium.Env`.
 | 0 | `probs[idx]` (LSTM signal) | [0, 1] |
 | 1 | `extra_features[idx, 0]` (5-day return norm) | [0, 1] |
 | 2 | `extra_features[idx, 1]` (vol norm) | [0, 1] |
-| 3 | `pos_ratio` = shares×price / total | [−1, 2] |
+| 3 | `pos_ratio` = shares×price / total | [−1, 1] |
 | 4 | `cash_ratio` = cash / total | [−1, 2] |
 | 5 | `extra_features[idx, 2]` (regime) | [0, 1] |
 
@@ -241,7 +259,7 @@ Inherits from `gymnasium.Env`.
 1. Map `action` → `target_pos` via `ACTION_MAP`.
 2. Compute `current_pos = shares × price / total`.
 3. Compute `delta = target_pos - current_pos`, then `shares_delta = delta × total / price`.
-4. Adjust `_shares` and `_cash` accordingly (no transaction costs).
+4. Adjust `_shares` and `_cash` accordingly, then charge turnover cost plus slippage.
 5. Advance `_step_count` by 1 and read the next price.
 6. If `_cash < 0`, charge margin: `_cash -= abs(_cash) × MARGIN_RATE`.
 7. Compute reward:
@@ -255,7 +273,7 @@ alignment        = (1 + pos_ratio_new × desired) / 2
 vol_penalty      = vol_t × |pos_ratio_new| × |daily_return| × vol_penalty_w   # = 0
 bonus            = alignment × |daily_return| × signal_bonus_w
 
-reward           = reward_base + bonus − vol_penalty
+reward           = reward_base + bonus − vol_penalty − trading_cost
 ```
 
 8. Episode terminates when `_step_count >= episode_len` (252 steps).
@@ -273,27 +291,21 @@ set_seeds(42)  # sets random, numpy, and torch seeds
 ### Training data split
 
 ```python
-mask = (
-    (df['Date'] >= '1990-01-01') &
-    (df['Date'] <  '2019-01-01') &
-    ~((df['Date'] >= '2002-01-01') & (df['Date'] < '2003-01-01')) &
-    ~((df['Date'] >= '2008-01-01') & (df['Date'] < '2009-01-01'))
-)
+train_end, val_end = int(len(df) * 0.70), int(len(df) * 0.80)
+rl_train_df = df.iloc[:train_end].reset_index(drop=True)
+eval_df = df.iloc[val_end:].reset_index(drop=True)
 ```
 
-**Date range:** 1990–2019, with two crisis years excluded:
-- 2002 (dot-com crash)
-- 2008 (Global Financial Crisis)
-
-**Result:** 6,551 rows for RL training.
+The split is chronological and retains all market regimes; crisis years are not
+removed from training. The exact counts depend on the checked-in dataset and
+are reported by the canonical audit.
 
 ### LSTM signal generation (training)
 
-After passing through `generate_prob_series` with window=60:
-- Output shape: **6,491 steps** (6,551 − 60)
-- Raw prob: mean=0.643, std=0.120
-- Normalized prob: mean=0.486, std=0.319
-- Valid start positions for 252-day episodes: **6,238**
+After passing through `generate_prob_series` with window=60, the output length
+is the training-frame length minus 60. The signal normalization statistics are
+saved and reused for test inference; counts are emitted by the audit rather
+than copied from the historical output cell.
 
 ---
 
@@ -345,21 +357,21 @@ A smoothing window of `max(1, len(rewards) // 20)` is applied with `np.convolve`
 ### Model saving
 
 ```python
-dqn.save(DQN_SAVE)  # saves to …/models/dqn_nasdaq_252.zip
+dqn.save(DQN_SAVE)  # saves to …/models/dqn_nasdaq_canonical.zip
 ```
 
 ---
 
-## Section 8 — Evaluate on 2019–2026 Out-of-Sample (Cells 16–20)
+## Section 8 — Historical 2019–2026 Evaluation (Retired; Cells 16–20)
 
 ### Test split
 
-The test set is the last **20%** of the full dataset by row index (`t2 = int(n * 0.80)`):
-- **1,770 rows**, from **2019-02-04 to 2026-02-18**
+The test set is the last **20%** of the full dataset by row index (`val_end = int(n * 0.80)`).
+The exact dates are emitted by `scripts/audit_pipeline.py` and should be stored
+with every model result.
 
-After the 60-step LSTM window: **1,710 test steps**.  
-Raw prob (test): mean=0.673, std=0.123  
-Normalized prob (test): mean=0.486, std=0.328
+The test inference reuses the training signal normalization statistics after
+the 60-step LSTM context; it does not fit any statistic on test rows.
 
 ### Evaluation helper functions
 
@@ -389,13 +401,15 @@ Returns `np.full(len(prices), initial_cash)` — never invests.
 - If `prob < 0.4`: go to cash (pos = 0.0)
 - Otherwise: hold current position
 
-No transaction costs. Cash is not redeployable past what is available.
+The historical helper shown in the output cell did not charge costs. New
+comparisons must use `quant_pipeline.backtest.simulate_positions`, which applies
+the same turnover cost and slippage assumptions to every strategy.
 
 #### `run_dqn_eval(prices, probs, extra_features, dqn_model, initial_cash=10_000)`
 
 Runs the DQN as a **single continuous episode** over the full test period (`episode_len = len(prices) - 1`). Uses `deterministic=True` prediction (no exploration). Records portfolio value after every step and the chosen action.
 
-### Results table
+### Historical results table (retired)
 
 ```
 Strategy                   Total Ret   Sharpe  Sortino    Max DD  Win Rate
@@ -406,9 +420,11 @@ Always Cash                   0.00%    0.000    0.000    0.00%    0.00%
 Fixed Threshold             134.57%    0.699    0.643   34.97%   27.15%
 ```
 
-The DQN achieves **510.90% total return** (vs. 182.67% for buy-and-hold) with a **Sharpe of 0.954** and **Sortino of 1.087** over the 2019–2026 out-of-sample period. Its max drawdown (35.65%) is slightly better than buy-and-hold (36.40%).
+The table above is retained only as a record of the original notebook run. It
+must not be interpreted as a validated result because it predates the corrected
+target, signal normalization, exposure limit, and cost-aware evaluation.
 
-### Action distribution (out-of-sample)
+### Historical action distribution (out-of-sample; retired)
 
 | Action | Position | % of steps |
 |--------|----------|-----------|
@@ -431,20 +447,14 @@ The DQN achieves **510.90% total return** (vs. 182.67% for buy-and-hold) with a 
 | 18 | +0.8 | 0.4% |
 | 19 | +0.9 | 0.1% |
 | 20 | +1.0 (fully long) | 2.1% |
-| 22 | +1.2 | 0.3% |
-| 24 | +1.4 | 2.2% |
-| 25 | +1.5 | 2.6% |
-| 26 | +1.6 | 0.2% |
-| 27 | +1.7 | 6.1% |
-| 28 | +1.8 | 0.2% |
-| 29 | +1.9 | 8.0% |
-| 30 | +2.0 (2× leveraged) | 18.4% |
-
-Actions 4, 8, 21, and 23 are never chosen. The agent heavily favors either **short positions** (−0.8 at 11.8%, −0.9 at 7.8%, −0.3 at 8.5%) or **high leveraged long positions** (+2.0 at 18.4%, +0.5 at 11.9%, +1.9 at 8.0%). Very few steps are taken at near-zero position, reflecting a bimodal "risk-on / risk-off" strategy.
+The action distribution above is also historical and includes actions that are
+outside the corrected unlevered range; it should not be used to characterize a
+new policy.
 
 ### Equity curve plot (Cell 20)
 
-Plots all four strategies over 1,710 trading days (x-axis: Trading Day, y-axis: Portfolio Value in $). Saved to `EQUITY_SAVE`. DQN is plotted in **darkorange**, buy-and-hold as dashed, always-cash as dotted, and fixed threshold as dash-dot.
+New equity curves should be generated by the cost-aware evaluator and saved
+alongside its JSON metadata.
 
 ---
 
@@ -455,31 +465,31 @@ nasdaq_multivariate.csv
         │
         ▼
 load_and_engineer_features()
-  → 8,848 rows, 30+ engineered columns
+  → labelled rows after feature engineering (count reported by canonical audit)
         │
-        ├─── Training split (1990–2019, excl. 2002, 2008) → 6,551 rows
+        ├─── Training split (chronological first 70%, all regimes)
         │         │
         │         ▼
         │   generate_prob_series()  [LSTM rolling inference, window=60]
-        │     → probs (6491,), prices (6491,), extra (6491, 3)
+        │     → probs, prices, extra, and train-fitted signal statistics
         │         │
         │         ▼
         │   NASDAQTradingEnv  [gymnasium, 252-step episodes]
         │         │
         │         ▼
         │   DQN.learn(1_000_000 timesteps)
-        │     → dqn_nasdaq_252.zip
+        │     → dqn_nasdaq_canonical.zip
         │
-        └─── Test split (last 20%, 2019–2026) → 1,770 rows
+        └─── Test split (chronological last 20%)
                   │
                   ▼
             generate_prob_series()
-              → probs (1710,), prices (1710,), extra (1710, 3)
+              → probs, prices, extra using the training signal statistics
                   │
                   ▼
             run_dqn_eval()  [deterministic, single 1710-step episode]
               → portfolio_values, actions
                   │
                   ▼
-            compute_metrics()  → Total Ret 510.90%, Sharpe 0.954
+            cost-aware evaluation under `quant_pipeline.backtest` and `metrics`
 ```

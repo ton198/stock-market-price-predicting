@@ -23,10 +23,10 @@
                     └─────────┬──────────┘
                               │  hidden (256,)
                     ┌─────────▼──────────┐
-                    │  Linear(256 → 31)  │   <- one Q-value per position
+                    │  Linear(256 → 21)  │   <- one Q-value per position
                     └─────────┬──────────┘
                               │
-                        Q-values (31,)
+                        Q-values (21,)
                               │
                ┌──────────────▼───────────────┐
                │       e-greedy policy        │
@@ -34,8 +34,8 @@
                │  eval : argmax Q             │
                └──────────────┬───────────────┘
                               │
-                    action in {0 ... 30}
-                    position in {-100% ... +200%}
+                    action in {0 ... 20}
+                    position in {-100% ... +100%}
 
 ─────────────────────────────────────────────────────────────
                     TRAINING  LOOP
